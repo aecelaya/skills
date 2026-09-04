@@ -32,6 +32,18 @@ Unlabeled NIfTIs  →  misfit_index  →  misfit_train  →  Pretrained Encoder
 
 ---
 
+## Installation
+
+```console
+pip install misfit-medical
+```
+
+or the container: `docker pull mistmedical/misfit:latest`. From source (to add a
+new model, loss, or aggregator — see Registry Pattern below):
+`git clone https://github.com/mist-medical/MISFIT.git && cd MISFIT && pip install -e .`
+
+---
+
 ## CLI Commands
 
 | Command              | Module                          | Purpose                                              |
@@ -185,6 +197,19 @@ misfit_evaluate --checkpoint /runs/exp1/models/best_model.pt \
                 --config     /runs/exp1/config.json \
                 --output-csv /runs/exp1/eval_results.csv
 ```
+
+### Key flags
+
+| Flag                     | Default                         | Description                                       |
+| ------------------------ | ------------------------------- | ------------------------------------------------- |
+| `--checkpoint PT`        | required                        | Pretrained checkpoint from `misfit_train`         |
+| `--index PARQUET`        | required                        | Parquet index from `misfit_index`                 |
+| `--config JSON`          | required                        | `config.json` from `misfit_train`                 |
+| `--output-csv CSV`       | required                        | Destination for the results CSV                   |
+| `--split SPLIT`          | `val`                           | Only rows with this split value; `""` = all rows  |
+| `--metrics NAME [NAME…]` | config's `evaluation` section   | Overrides which metrics to compute                |
+| `--seed N`               | 42                              | Base RNG seed; the mask for tile _i_ = `seed + i` |
+| `--device DEVICE`        | `cuda` if available, else `cpu` | Torch device, e.g. `cuda:0`, `cpu`                |
 
 Key behaviour:
 
@@ -535,8 +560,13 @@ mist_train \
     --results            /path/to/mist/results \
     --model              swinunetr-base \
     --pretrained-weights /runs/pretrain/models/encoder_weights.pt \
+    --pretrained-config  /runs/pretrain/config.json \
     --warmup-epochs      10
 ```
+
+`--pretrained-config` (recommended) points MIST at the MISFIT `config.json` so
+it validates architecture/encoder compatibility before loading the weights;
+omitting it only prints a warning and skips that check.
 
 **Architecture must match** — use the same variant name
 (`swinunetr-small/base/large`) in both MISFIT and MIST. Only MIST's SwinUNETR
@@ -585,8 +615,12 @@ Place under `loss_functions/reconstruction/`, import in
 `@register_model(name="...")`, place under `models/<name>/`, import in
 `models/__init__.py`.
 
-**New metric**: subclass `ReconstructionMetric`, `@register_metric(name="...")`,
-place under `metrics/`, import in `metrics/__init__.py`.
+**New metric**: subclass `ReconstructionMetric`, apply `@register_metric` as a
+class decorator (it instantiates and registers the class). Unlike the other
+registries, metrics don't follow a one-file-per-class layout — the concrete
+classes live directly in `metrics/metrics_registry.py`, and
+`metrics/__init__.py` is empty. Add the class there (or in a new file imported
+from `metrics_registry.py`).
 
 **New aggregator**: subclass `AbstractAggregator`,
 `@register_aggregator(name="...")`, place under `embedding/aggregators/`, import
@@ -692,6 +726,7 @@ mist_train \
     --results            /runs/mist_finetune \
     --model              swinunetr-base \
     --pretrained-weights /runs/exp1/models/encoder_weights.pt \
+    --pretrained-config  /runs/exp1/config.json \
     --warmup-epochs      10
 ```
 
