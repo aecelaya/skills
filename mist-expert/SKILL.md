@@ -27,7 +27,8 @@ MIST automates the full segmentation pipeline:
 4. **Predict** (`mist_predict`) — sliding-window inference with optional TTA and
    postprocessing.
 5. **Ensemble** (`mist_ensemble`) — combines discrete NIfTI predictions from
-   multiple models via STAPLE or majority vote.
+   multiple models via STAPLE or majority vote, or averages pre-argmax
+   probability volumes from `mist_predict --output-probs`.
 6. **Evaluate** (`mist_evaluate`) — computes per-patient metrics against ground
    truth.
 7. **Postprocess** (`mist_postprocess`) — applies strategy-based morphological
@@ -140,6 +141,11 @@ Accepts all flags from `mist_analyze`, `mist_preprocess`, and `mist_train`.
 --output             Output directory for predictions (required)
 --device             cpu, cuda, or GPU index like 0 (default: cuda)
 --postprocess-strategy  Path to postprocessing strategy JSON
+--output-probs       Also write each patient's final (post fold/TTA-ensemble,
+                     pre-argmax) softmax probability volume. Splits output
+                     into discrete/ and probabilities/ subdirectories instead
+                     of a flat layout. Use with `mist_ensemble --input-type
+                     probabilities` to combine probabilities across models.
 ```
 
 ### `mist_evaluate`
@@ -179,21 +185,37 @@ Accepts all flags from `mist_analyze`, `mist_preprocess`, and `mist_train`.
 ### `mist_ensemble`
 
 ```
---predictions          Two or more directories of NIfTI predictions, one per patient (required)
---output               Directory for consensus predictions (required)
---ensemble-backend     staple (default) or majority_vote
+--predictions           Two or more directories of predictions, one per patient (required)
+--output                Directory for consensus predictions (required)
+--input-type            labels (default) or probabilities
+--config                Path to config.json; required when --input-type probabilities
+--ensemble-backend      staple (default) or majority_vote — used when --input-type labels
+--probability-ensemble-backend  mean (default) — used when --input-type probabilities
+--num-workers-ensemble  Parallel workers, one per patient (default: 1)
 ```
 
-Combines post-argmax label maps from separately trained models into a single
-consensus segmentation. All input directories must contain the same set of
-`<patient_id>.nii.gz` files. Patient IDs are validated upfront; per-patient
-errors are accumulated without crashing the run. Works for both binary (single
-foreground class) and multi-class label maps.
+Two modes, selected via `--input-type`:
 
-| Backend         | Algorithm             | Notes                                                              |
-| --------------- | --------------------- | ------------------------------------------------------------------ |
-| `staple`        | MultiLabelSTAPLE (EM) | Principled — estimates per-model sensitivity/specificity. Default. |
-| `majority_vote` | LabelVoting           | Faster and simpler. Ties resolved to background (label 0).         |
+- **`labels`** (default) — combines post-argmax discrete label maps from
+  separately trained models via `--ensemble-backend`. All input directories must
+  contain the same set of `<patient_id>.nii.gz` files. Works for both binary
+  (single foreground class) and multi-class label maps.
+- **`probabilities`** — combines continuous, pre-argmax softmax probability
+  volumes written by `mist_predict --output-probs` via
+  `--probability-ensemble-backend` (element-wise average), then argmaxes once
+  and remaps to the original dataset labels using `--config`. Preserves
+  confidence information that STAPLE/majority vote discard by operating on
+  already-discretized label maps. Point `--predictions` at each model's
+  `probabilities/` subdirectory.
+
+Patient IDs are validated upfront; per-patient errors are accumulated without
+crashing the run.
+
+| Backend         | Input type      | Algorithm                                  | Notes                                                              |
+| --------------- | --------------- | ------------------------------------------ | ------------------------------------------------------------------ |
+| `staple`        | `labels`        | MultiLabelSTAPLE (EM)                      | Principled — estimates per-model sensitivity/specificity. Default. |
+| `majority_vote` | `labels`        | LabelVoting                                | Faster and simpler. Ties resolved to background (label 0).         |
+| `mean`          | `probabilities` | Element-wise average, then a single argmax | Default for `--input-type probabilities`.                          |
 
 ### `mist_average_weights`
 
@@ -498,6 +520,29 @@ mist_ensemble --predictions /path/to/pred_dice \
                             /path/to/pred_hdos \
               --output /path/to/ensemble_output \
               --ensemble-backend staple
+```
+
+**Ensemble at the probability level, preserving confidence information:**
+
+```bash
+mist_predict --models-dir /path/to/model_a/results/models \
+             --config /path/to/model_a/results/config.json \
+             --paths-csv /path/to/test.csv \
+             --output /path/to/pred_a \
+             --output-probs
+
+mist_predict --models-dir /path/to/model_b/results/models \
+             --config /path/to/model_b/results/config.json \
+             --paths-csv /path/to/test.csv \
+             --output /path/to/pred_b \
+             --output-probs
+
+mist_ensemble --predictions /path/to/pred_a/probabilities \
+                            /path/to/pred_b/probabilities \
+              --output /path/to/ensemble_output \
+              --input-type probabilities \
+              --config /path/to/model_a/results/config.json \
+              --num-workers-ensemble 8
 ```
 
 **Rank two postprocessing strategies:**
