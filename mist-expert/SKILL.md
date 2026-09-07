@@ -743,6 +743,10 @@ is `0.0` (the full held-out fold is used for validation).
 
 ## Data Dump → LLM Workflow
 
+**Experimental** — still under active development; the fields in
+`data_dump.json`/`data_dump.md` may still change. Useful today, but don't
+present it to a user as a finished, stable feature.
+
 Run `mist_analyze --data-dump` to produce `data_dump.json` and `data_dump.md`
 alongside `config.json`. The Markdown file contains:
 
