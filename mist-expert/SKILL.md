@@ -776,7 +776,9 @@ the first time `mist_train` runs, and the resolved value is persisted back to
   pipeline) on CUDA hardware where it's installed; MIST's own generic,
   pure-PyTorch data loader everywhere else — AMD ROCm, CPU-only, or a CUDA
   machine that skipped installing DALI (`pip install "mist-medical[dali]"`,
-  recommended on NVIDIA GPUs). The generic loader
+  recommended on NVIDIA GPUs; `pip install "mist-medical[train]"` is kept as
+  an identical alias for users on pre-CPU/ROCm-support MIST releases). The
+  generic loader
   (`mist/data_loading/generic_loader.py`) implements the same augmentations (flips, zoom, noise,
   blur, brightness, contrast) on CPU instead of in a GPU pipeline — slower
   per batch, no NVIDIA-specific dependency. If CUDA hardware is detected but
