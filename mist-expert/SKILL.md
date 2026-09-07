@@ -340,12 +340,18 @@ Key rules:
 - `patch_overlap` must be in `[0, 1)` — `1.0` is invalid.
 - `training.amp` enables BF16 automatic mixed precision (default: `true`). BF16
   is hardware-accelerated on NVIDIA Ampere or newer GPUs (A100, RTX 30xx, H100)
-  and on AMD ROCm GPUs. MIST resolves this against the detected hardware at
+  and on AMD GPUs with matrix hardware — CDNA (MI100/200/300) and RDNA3+ (RX
+  7000 series and newer). MIST resolves this against the detected hardware at
   train time (`hardware.resolve_amp()`) and downgrades to FP32 automatically
   with a warning when BF16 isn't supported — pre-Ampere NVIDIA cards (V100,
-  T4, RTX 20xx) and CPU-only hardware both hit this path. It never errors;
-  set `"amp": false` explicitly only to silence the warning. AMP is propagated
-  to validation, fold testing, and `mist_predict` inference automatically.
+  T4, RTX 20xx), pre-RDNA3 AMD cards (RX 5000/6000 series), and CPU-only
+  hardware all hit this path. `bf16_supported()` checks ROCm's `gcnArchName`
+  against a known-good allow-list rather than trusting
+  `torch.cuda.is_bf16_supported()`, which reports True on RDNA1/2 too (via
+  slow ALU emulation, not matrix hardware — confirmed to regress speed on a
+  real RX 6800-class card). It never errors; set `"amp": false` explicitly
+  only to silence the warning. AMP is propagated to validation, fold testing,
+  and `mist_predict` inference automatically.
 - `inference.inferer.params.sw_batch_size` controls how many sliding-window
   patches are processed per forward pass (default: `2 × batch_size_per_gpu`).
   Increase for higher GPU utilisation on high-VRAM cards; decrease if patch
