@@ -22,17 +22,27 @@ MIST automates the full segmentation pipeline:
    `config.json`.
 2. **Preprocess** (`mist_preprocess`) — reorients, crops, resamples, and
    normalizes NIfTI images into NumPy arrays.
-3. **Train** (`mist_train`) — five-fold cross-validation using PyTorch DDP; runs
-   evaluation on the held-out fold after each fold.
-4. **Predict** (`mist_predict`) — sliding-window inference with optional TTA and
+3. **Train** (`mist_train`) — five-fold cross-validation using PyTorch DDP. Once
+   every configured fold has finished training, aggregates out-of-fold
+   predictions into `results.csv` and runs held-out test-set inference if
+   configured. When folds are trained across separate per-node jobs instead
+   (`--folds` requests a subset), this finalization step is skipped and deferred
+   to `mist_finalize`.
+4. **Finalize** (`mist_finalize`) — only needed for distributed,
+   one-fold-per-node training (see
+   [Multi-GPU and HPC Setup](#multi-gpu-and-hpc-setup)). Run once, after every
+   per-fold `mist_train` job sharing a `--results` directory has finished, to
+   produce the final `results.csv` and test-set predictions.
+5. **Predict** (`mist_predict`) — sliding-window inference with optional TTA and
    postprocessing.
-5. **Ensemble** (`mist_ensemble`) — combines discrete NIfTI predictions from
-   multiple models via STAPLE or majority vote.
-6. **Evaluate** (`mist_evaluate`) — computes per-patient metrics against ground
+6. **Ensemble** (`mist_ensemble`) — combines discrete NIfTI predictions from
+   multiple models via STAPLE or majority vote, or averages pre-argmax
+   probability volumes from `mist_predict --output-probs`.
+7. **Evaluate** (`mist_evaluate`) — computes per-patient metrics against ground
    truth.
-7. **Postprocess** (`mist_postprocess`) — applies strategy-based morphological
+8. **Postprocess** (`mist_postprocess`) — applies strategy-based morphological
    transforms.
-8. **Rank** (`mist_rank`) — BraTS-style ranking of N evaluation result CSVs.
+9. **Rank** (`mist_rank`) — BraTS-style ranking of N evaluation result CSVs.
 
 Run the full pipeline in one command with `mist_run_all`.
 
@@ -122,7 +132,10 @@ Accepts all flags from `mist_analyze`, `mist_preprocess`, and `mist_train`.
 --warmup-epochs           Linear warmup epochs (overrides config.json; default comes from config)
 --optimizer               Optimizer: adamw, adam, sgd (default: adamw)
 --l2-penalty              Weight decay (default: 0.0001)
---folds                   Which folds to run (default: all)
+--folds                   Which folds to run (default: all). If a strict
+                          subset of the configured folds, the post-training
+                          finalization step (results.csv, test-set inference)
+                          is skipped -- see `mist_finalize` below.
 --resume                  Resume from last checkpoint
 --pretrained-weights      Path to pretrained checkpoint for encoder init
 --pretrained-config       Path to source config.json (recommended with --pretrained-weights; enables encoder-compatibility validation)
@@ -130,6 +143,24 @@ Accepts all flags from `mist_analyze`, `mist_preprocess`, and `mist_train`.
 --num-workers-evaluate    Parallel workers for post-fold evaluation (default: 1)
 --overwrite               Overwrite existing results
 ```
+
+### `mist_finalize`
+
+Only needed for distributed, one-fold-per-node training (see
+[Multi-GPU and HPC Setup](#multi-gpu-and-hpc-setup)). Aggregates out-of-fold
+predictions into `results.csv` and runs held-out test-set inference, if
+configured -- the same steps `mist_train` runs automatically when a single
+invocation trains every fold.
+
+```
+--results               Path to output of the MIST pipeline (default: ./results)
+--num-workers-evaluate  Parallel workers for evaluation (default: 1)
+--device                cpu, cuda, or GPU index like 0, for test-set inference (default: cuda)
+```
+
+Safe to re-run: each run recomputes `results.csv` (and test-set predictions, if
+configured) from whatever is currently in the results directory. Warns (does not
+fail) if any configured fold is still missing a saved model.
 
 ### `mist_predict`
 
@@ -140,6 +171,11 @@ Accepts all flags from `mist_analyze`, `mist_preprocess`, and `mist_train`.
 --output             Output directory for predictions (required)
 --device             cpu, cuda, or GPU index like 0 (default: cuda)
 --postprocess-strategy  Path to postprocessing strategy JSON
+--output-probs       Also write each patient's final (post fold/TTA-ensemble,
+                     pre-argmax) softmax probability volume. Splits output
+                     into discrete/ and probabilities/ subdirectories instead
+                     of a flat layout. Use with `mist_ensemble --input-type
+                     probabilities` to combine probabilities across models.
 ```
 
 ### `mist_evaluate`
@@ -179,21 +215,37 @@ Accepts all flags from `mist_analyze`, `mist_preprocess`, and `mist_train`.
 ### `mist_ensemble`
 
 ```
---predictions          Two or more directories of NIfTI predictions, one per patient (required)
---output               Directory for consensus predictions (required)
---ensemble-backend     staple (default) or majority_vote
+--predictions           Two or more directories of predictions, one per patient (required)
+--output                Directory for consensus predictions (required)
+--input-type            labels (default) or probabilities
+--config                Path to config.json; required when --input-type probabilities
+--ensemble-backend      staple (default) or majority_vote — used when --input-type labels
+--probability-ensemble-backend  mean (default) — used when --input-type probabilities
+--num-workers-ensemble  Parallel workers, one per patient (default: 1)
 ```
 
-Combines post-argmax label maps from separately trained models into a single
-consensus segmentation. All input directories must contain the same set of
-`<patient_id>.nii.gz` files. Patient IDs are validated upfront; per-patient
-errors are accumulated without crashing the run. Works for both binary (single
-foreground class) and multi-class label maps.
+Two modes, selected via `--input-type`:
 
-| Backend         | Algorithm             | Notes                                                              |
-| --------------- | --------------------- | ------------------------------------------------------------------ |
-| `staple`        | MultiLabelSTAPLE (EM) | Principled — estimates per-model sensitivity/specificity. Default. |
-| `majority_vote` | LabelVoting           | Faster and simpler. Ties resolved to background (label 0).         |
+- **`labels`** (default) — combines post-argmax discrete label maps from
+  separately trained models via `--ensemble-backend`. All input directories must
+  contain the same set of `<patient_id>.nii.gz` files. Works for both binary
+  (single foreground class) and multi-class label maps.
+- **`probabilities`** — combines continuous, pre-argmax softmax probability
+  volumes written by `mist_predict --output-probs` via
+  `--probability-ensemble-backend` (element-wise average), then argmaxes once
+  and remaps to the original dataset labels using `--config`. Preserves
+  confidence information that STAPLE/majority vote discard by operating on
+  already-discretized label maps. Point `--predictions` at each model's
+  `probabilities/` subdirectory.
+
+Patient IDs are validated upfront; per-patient errors are accumulated without
+crashing the run.
+
+| Backend         | Input type      | Algorithm                                  | Notes                                                              |
+| --------------- | --------------- | ------------------------------------------ | ------------------------------------------------------------------ |
+| `staple`        | `labels`        | MultiLabelSTAPLE (EM)                      | Principled — estimates per-model sensitivity/specificity. Default. |
+| `majority_vote` | `labels`        | LabelVoting                                | Faster and simpler. Ties resolved to background (label 0).         |
+| `mean`          | `probabilities` | Element-wise average, then a single argmax | Default for `--input-type probabilities`.                          |
 
 ### `mist_average_weights`
 
@@ -228,7 +280,7 @@ generated by `mist_analyze` and required by all downstream commands.
 
 ```json
 {
-  "mist_version": "2.0.1-rc",
+  "mist_version": "2.3.0rc0",
   "dataset_info": { "task": "...", "modality": "mr", "images": [...], "labels": [...] },
   "spatial_config": {
     "patch_size": [128, 128, 128],
@@ -264,7 +316,10 @@ generated by `mist_analyze` and required by all downstream commands.
     "hardware": {
       "num_gpus": 1,
       "num_cpu_workers": 8,
-      "master_port": 12345
+      "master_addr": "localhost",
+      "master_port": 12345,
+      "communication_backend": "nccl",
+      "data_loader": "dali"
     }
   },
   "inference": {
@@ -284,11 +339,19 @@ Key rules:
   truth — edit here to override analysis.
 - `patch_overlap` must be in `[0, 1)` — `1.0` is invalid.
 - `training.amp` enables BF16 automatic mixed precision (default: `true`). BF16
-  requires an NVIDIA Ampere or newer GPU (A100, RTX 30xx, H100). On pre-Ampere
-  cards (V100, T4, RTX 20xx) set `"amp": false` — those GPUs do not support BF16
-  and training will error or silently fall back to FP32 depending on driver
-  version. AMP is propagated to validation, fold testing, and `mist_predict`
-  inference automatically.
+  is hardware-accelerated on NVIDIA Ampere or newer GPUs (A100, RTX 30xx, H100)
+  and on AMD GPUs with matrix hardware — CDNA (MI100/200/300) and RDNA3+ (RX
+  7000 series and newer). MIST resolves this against the detected hardware at
+  train time (`hardware.resolve_amp()`) and downgrades to FP32 automatically
+  with a warning when BF16 isn't supported — pre-Ampere NVIDIA cards (V100,
+  T4, RTX 20xx), pre-RDNA3 AMD cards (RX 5000/6000 series), and CPU-only
+  hardware all hit this path. `bf16_supported()` checks ROCm's `gcnArchName`
+  against a known-good allow-list rather than trusting
+  `torch.cuda.is_bf16_supported()`, which reports True on RDNA1/2 too (via
+  slow ALU emulation, not matrix hardware — confirmed to regress speed on a
+  real RX 6800-class card). It never errors; set `"amp": false` explicitly
+  only to silence the warning. AMP is propagated to validation, fold testing,
+  and `mist_predict` inference automatically.
 - `inference.inferer.params.sw_batch_size` controls how many sliding-window
   patches are processed per forward pass (default: `2 × batch_size_per_gpu`).
   Increase for higher GPU utilisation on high-VRAM cards; decrease if patch
@@ -296,8 +359,16 @@ Key rules:
 - `grad_clip_norm` is not exposed as a CLI flag; edit `config.json` directly.
 - `training.hardware.master_port` defaults to `12345`; change it when running
   multiple concurrent MIST jobs on the same machine to avoid port conflicts.
-- `training.hardware.num_cpu_workers` controls DALI's internal CPU thread count
-  (default: 8); not the same as `--num-workers-*` flags.
+- `training.hardware.num_cpu_workers` controls the active data loader's
+  internal CPU thread/worker count (DALI threads, or the generic loader's
+  `DataLoader` workers — whichever is active, see below); default: 8. Not
+  the same as `--num-workers-*` flags.
+- `training.hardware.data_loader` and `training.hardware.communication_backend`
+  both default to `"auto"` in a freshly analyzed `config.json` and are
+  resolved once, at train time, against the detected accelerator (CUDA, AMD
+  ROCm, or CPU) — see [Accelerator Detection and Data Loaders](#accelerator-detection-and-data-loaders)
+  below. An explicit non-`"auto"` value is always respected and never
+  overridden.
 
 ---
 
@@ -500,6 +571,29 @@ mist_ensemble --predictions /path/to/pred_dice \
               --ensemble-backend staple
 ```
 
+**Ensemble at the probability level, preserving confidence information:**
+
+```bash
+mist_predict --models-dir /path/to/model_a/results/models \
+             --config /path/to/model_a/results/config.json \
+             --paths-csv /path/to/test.csv \
+             --output /path/to/pred_a \
+             --output-probs
+
+mist_predict --models-dir /path/to/model_b/results/models \
+             --config /path/to/model_b/results/config.json \
+             --paths-csv /path/to/test.csv \
+             --output /path/to/pred_b \
+             --output-probs
+
+mist_ensemble --predictions /path/to/pred_a/probabilities \
+                            /path/to/pred_b/probabilities \
+              --output /path/to/ensemble_output \
+              --input-type probabilities \
+              --config /path/to/model_a/results/config.json \
+              --num-workers-ensemble 8
+```
+
 **Rank two postprocessing strategies:**
 
 ```bash
@@ -528,6 +622,20 @@ mist_preprocess --results /path/to/results --numpy /path/to/numpy --no-preproces
 CUDA_VISIBLE_DEVICES=0,1 mist_train --results /path/to/results --numpy /path/to/numpy
 ```
 
+**Train each fold as a separate job, sharing a results directory (HPC, one fold
+per node):**
+
+```bash
+# Node 0:
+mist_train --numpy /shared/numpy --results /shared/results --folds 0
+# Node 1:
+mist_train --numpy /shared/numpy --results /shared/results --folds 1
+# ...and so on for the rest of nfolds.
+
+# After every node's job has finished:
+mist_finalize --results /shared/results
+```
+
 **Fine-tune from pretrained weights:**
 
 ```bash
@@ -551,8 +659,8 @@ results/
     fg_bboxes.csv
     train_paths.csv
     test_paths.csv      # Only if test-data is set
-    evaluation_paths.csv
-    results.csv
+    evaluation_paths.csv  # Written by mist_train (or mist_finalize, if used)
+    results.csv           # Written by mist_train (or mist_finalize, if used)
     data_dump.json      # Only with --data-dump
     data_dump.md        # Only with --data-dump
 ```
@@ -567,6 +675,12 @@ memory:
 ```
 budget = (min_gpu_memory / 16 GB) × 128³ × (2 / batch_size_per_gpu)
 ```
+
+On CPU-only hardware (no CUDA/ROCm device visible), there's no GPU memory to
+size against, so this falls back to a fixed default budget of 128³ voxels
+instead — a deliberate simplification, not a bug; a CPU-RAM-aware budget was
+considered and rejected as unnecessary complexity for now (see
+`cpu_rocm_support_plan.md`'s Stage 1 notes in the MIST repo history).
 
 - **Isotropic mode** (used when `max_spacing / min_spacing ≤ 3`): computes a
   physically isotropic patch extent from the budget, clamps axes to median image
@@ -629,6 +743,10 @@ is `0.0` (the full held-out fold is used for validation).
 
 ## Data Dump → LLM Workflow
 
+**Experimental** — still under active development; the fields in
+`data_dump.json`/`data_dump.md` may still change. Useful today, but don't
+present it to a user as a finished, stable feature.
+
 Run `mist_analyze --data-dump` to produce `data_dump.json` and `data_dump.md`
 alongside `config.json`. The Markdown file contains:
 
@@ -646,18 +764,76 @@ recommendations tailored to your specific dataset.
 
 ---
 
+## Accelerator Detection and Data Loaders
+
+MIST auto-detects its accelerator (NVIDIA CUDA, AMD ROCm, or CPU-only) via
+`mist.utils.hardware.get_accelerator_type()` — CUDA and ROCm both go through
+`torch.cuda.*` (ROCm reuses that namespace as a compatibility shim);
+`torch.version.hip` (a version string on ROCm, `None` otherwise) is what
+tells them apart. Nothing needs to be set for this — it's automatic.
+
+Two `config.json` fields get resolved against the detected accelerator, once,
+the first time `mist_train` runs, and the resolved value is persisted back to
+`config.json` (same pattern as `training.amp`'s resolve-and-persist):
+
+- **`training.hardware.data_loader`**: `"dali"` (NVIDIA's GPU-accelerated
+  pipeline) on CUDA hardware where it's installed; MIST's own generic,
+  pure-PyTorch data loader everywhere else — AMD ROCm, CPU-only, or a CUDA
+  machine that skipped installing DALI (`pip install "mist-medical[dali]"`,
+  recommended on NVIDIA GPUs; `pip install "mist-medical[train]"` is kept as
+  an identical alias for users on pre-CPU/ROCm-support MIST releases). The
+  generic loader
+  (`mist/data_loading/generic_loader.py`) implements the same augmentations (flips, zoom, noise,
+  blur, brightness, contrast) on CPU instead of in a GPU pipeline — slower
+  per batch, no NVIDIA-specific dependency. If CUDA hardware is detected but
+  DALI isn't registered (not installed), MIST warns and falls back to the
+  generic loader rather than raising.
+- **`training.hardware.communication_backend`**: `"nccl"` on both CUDA and
+  ROCm (ROCm routes `"nccl"` to RCCL transparently — no code change needed),
+  `"gloo"` on CPU-only hardware.
+
+Both default to `"auto"` in a freshly analyzed `config.json`; an explicit
+non-`"auto"` value already in `config.json` is always respected, never
+silently overridden. CPU-only training is single-process only — no
+multi-CPU-process distributed training (multi-GPU DDP, on either CUDA or
+ROCm, works as described below).
+
+Loader/backend selection is implemented via a small registry
+(`mist.data_loading.data_loader_registry`), the same pattern used for models,
+losses, and optimizers elsewhere in MIST.
+
 ## Multi-GPU and HPC Setup
 
-MIST uses PyTorch DDP. It automatically uses all GPUs visible to the process.
+MIST uses PyTorch DDP, on both NVIDIA CUDA and AMD ROCm GPUs. It automatically
+uses all GPUs visible to the process.
 
 - **Workstation**: restrict GPUs with `CUDA_VISIBLE_DEVICES=0,1 mist_train ...`
+  (this also works on ROCm — PyTorch's ROCm build recognizes it directly;
+  don't combine it with `ROCR_VISIBLE_DEVICES`/`HIP_VISIBLE_DEVICES` at the
+  same time).
 - **SLURM/LSF/PBS**: the scheduler sets `CUDA_VISIBLE_DEVICES` automatically. No
   extra flags needed.
 - **Port conflicts** (multiple concurrent jobs on same machine): change
   `training.hardware.master_port` in `config.json` to a unique value per job.
-- **DALI thread count**: tune `training.hardware.num_cpu_workers` in
-  `config.json` (default: 8) if your machine has significantly more or fewer CPU
-  cores.
+- **Data loader thread/worker count**: tune `training.hardware.num_cpu_workers`
+  in `config.json` (default: 8) if your machine has significantly more or
+  fewer CPU cores. Applies to whichever loader is active (DALI or generic).
+
+**Distributed training across nodes (one fold per node):** point every node at
+the same shared `--results` directory and restrict each one to its own fold(s)
+with `--folds` (e.g. `mist_train --folds 0 --results /shared/results` on node 0,
+`--folds 1` on node 1, ...). Each node's job still uses DDP across that node's
+own GPUs — one fold per node and multi-GPU per fold compose normally.
+
+Because each such job only trains a subset of the configured folds, `mist_train`
+skips its usual automatic finalization step (it would otherwise have every node
+race to overwrite the same shared `results.csv` and test predictions) and
+instead prints a reminder to run `mist_finalize` once, after every per-fold job
+has finished:
+
+```bash
+mist_finalize --results /shared/results
+```
 
 ---
 
@@ -682,7 +858,7 @@ mist/
     analyze_data/       # Analyzer, patch size selection, dataset statistics
     cli/                # All entrypoints and args.py
     conversion_tools/   # mist_convert_msd and mist_convert_csv logic
-    data_loading/       # DALI pipeline and augmentation
+    data_loading/       # DALI pipeline + generic (CPU/ROCm) loader, data loader registry
     evaluation/         # Metrics, evaluator, ranking
     inference/          # Sliding window, TTA, softmax ensemblers, label ensemblers, inference runners
     loss_functions/     # Loss registry, base class, all loss implementations
@@ -691,13 +867,17 @@ mist/
     preprocessing/      # Resampling, normalization, DTM computation
     runtime/            # Shared constants
     training/           # Trainers, optimizers, LR schedulers
-    utils/              # I/O, console output, misc
+    utils/              # I/O, console output, misc; hardware.py has accelerator
+                        # detection + amp/data-loader/communication-backend resolution
 ```
 
 All major extension points (models, losses, LR schedulers, optimizers,
-postprocessing transforms, evaluation metrics) use a **registry pattern**:
-implement the class/function, decorate it with `@register_<type>('name')`, and
-add an import to the corresponding `__init__.py`.
+postprocessing transforms, evaluation metrics, data loaders) use a **registry
+pattern**: implement the class/function, decorate it with
+`@register_<type>('name')` (or, for data loaders specifically, register the
+whole module via `register_data_loader(name, module)` — see
+`mist/data_loading/data_loader_registry.py`), and add an import to the
+corresponding `__init__.py`.
 
 ---
 
