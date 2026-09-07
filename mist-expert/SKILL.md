@@ -835,9 +835,6 @@ has finished:
 mist_finalize --results /shared/results
 ```
 
-On SLURM this maps onto a job dependency so finalize only starts once every fold
-job has completed: `sbatch --dependency=afterok:<fold-job-ids> finalize_job.sh`.
-
 ---
 
 ## Breaking Changes from 1.x
