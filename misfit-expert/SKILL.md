@@ -68,6 +68,11 @@ All argument parsing lives in `cli/args.py`. The `ArgParser` subclass adds
 `.arg()` and `.flag()` shorthands. `add_*_args` functions are shared between
 individual entrypoints.
 
+Every entrypoint module ends with `if __name__ == "__main__": <x>_entry()`, so
+each is also runnable as `python -m misfit.cli.<x>_entrypoint` — the form
+`torchrun -m misfit.cli.train_entrypoint` and shell-less container/Kubernetes
+manifests use instead of `$(which misfit_train)`.
+
 ---
 
 ## Stage 1 — Indexing (`misfit_index`)
@@ -123,8 +128,9 @@ masked and the model reconstructs them from visible context.
 misfit_train --index   /data/index.parquet \
              --results /runs/exp1
 
-# 4 GPUs
-torchrun --nproc_per_node=4 $(which misfit_train) \
+# 4 GPUs — -m works with no shell and nothing on PATH (container/Kubernetes
+# manifests need this form; $(which misfit_train) needs a shell to evaluate it)
+torchrun --nproc_per_node=4 -m misfit.cli.train_entrypoint \
     --index   /data/index.parquet \
     --results /runs/exp1
 
@@ -132,6 +138,11 @@ torchrun --nproc_per_node=4 $(which misfit_train) \
 misfit_train --index   /data/index.parquet \
              --results /runs/exp1 \
              --resume
+
+# Preview the resolved config.json (FP32) without training — no GPU/queue needed
+misfit_train --index   /data/index.parquet \
+             --results /runs/exp1 \
+             --init-only --no-amp
 ```
 
 ### Key flags
@@ -153,23 +164,29 @@ misfit_train --index   /data/index.parquet \
 | `--gradient-accumulation-steps N` | 1                       | Accumulate gradients over N batches                      |
 | `--bucket-cap-mb MB`              | 200                     | DDP all-reduce bucket size (vs PyTorch default 25)       |
 | `--seed N`                        | 42                      | Random seed                                              |
+| `--no-amp`                        | —                       | Request FP32 on a fresh run (ignored on `--resume`)      |
+| `--init-only`                     | —                       | Write config.json + skeleton dirs, exit without training |
 | `--resume`                        | —                       | Resume from checkpoint                                   |
 | `--overwrite`                     | —                       | Discard existing run and start fresh                     |
 
 `--resume` and `--overwrite` are mutually exclusive. If neither is passed and
-`config.json` exists, `misfit_train` refuses to run.
+`config.json` exists, `misfit_train` refuses to run — `--init-only` follows the
+same rule (it will not silently clobber a real run's config).
 
 AMP is **BF16-only** — there is no `--amp-dtype` flag and no fp16/GradScaler
-path (BF16 has float32's dynamic range). It is _requested_ on by default, then
-resolved against the actual hardware by `misfit.utils.hardware.resolve_amp` →
-`bf16_supported()`, which branches on `get_accelerator_type()` (cuda / rocm /
-cpu, via `torch.version.hip`): CUDA needs compute capability ≥ 8.0 (Ampere+);
-ROCm needs a `gcnArchName` in `_ROCM_BF16_ACCELERATED_ARCHES` (CDNA + RDNA3+).
-Pre-Ampere NVIDIA GPUs (V100, T4), older AMD GPUs (RDNA1/2 — gfx103x), and CPU
-fall back to **FP32** with a warning. `misfit_train` resolves once (from the
-default, or from the saved config on `--resume`) and writes the effective value
-into `config.json`. To turn AMP off entirely, set `"amp": false` in
-`config.json` and restart with `--resume`.
+path (BF16 has float32's dynamic range). It is _requested_ on by default (pass
+`--no-amp` to request FP32 instead), then resolved against the actual hardware
+by `misfit.utils.hardware.resolve_amp` → `bf16_supported()`, which branches on
+`get_accelerator_type()` (cuda / rocm / cpu, via `torch.version.hip`): CUDA
+needs compute capability ≥ 8.0 (Ampere+); ROCm needs a `gcnArchName` in
+`_ROCM_BF16_ACCELERATED_ARCHES` (CDNA + RDNA3+). Pre-Ampere NVIDIA GPUs (V100,
+T4), older AMD GPUs (RDNA1/2 — gfx103x), and CPU fall back to **FP32** with a
+warning. `misfit_train` resolves once (from `--no-amp`/the default, or from the
+saved config on `--resume` — `--no-amp` is _not_ consulted there, the saved
+value wins) and writes the effective value into `config.json`. To change AMP on
+a **fresh** run, use `--no-amp` (combine with `--init-only` to see the resolved
+config with no training at all); on a **resumed** run, hand-edit `"amp"` in
+`config.json` and restart with `--resume` — `--no-amp` has no effect there.
 
 **CPU / device path**: `misfit_train` runs on GPU (NCCL — RCCL on ROCm, same
 backend name) or CPU (gloo); `MAETrainer.use_cuda` gates device placement,
@@ -178,6 +195,27 @@ backend, and cuDNN tuning. AMD ROCm reports as a GPU (`use_cuda` is `True` —
 training works but is very slow — intended for tests and small debug runs, and
 it warns once at startup. `misfit_evaluate` / `misfit_inspect` / `misfit_encode`
 / `misfit_embed` already accept `--device cpu`.
+
+### Progress output
+
+Training and validation each show a live Rich progress bar with loss and (for
+training) learning rate refreshed every step — mirrors MIST's `TrainProgressBar`
+/ `ValidationProgressBar` (`misfit.utils.progress_bar`):
+
+```
+Epoch 3/10 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5/5 • 0:00:00 • loss: 0.3000 • lr: 1.e-04
+Validating ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3/3 • 0:00:00 • val_loss: 0.2800
+```
+
+With `--gradient-accumulation-steps > 1`, a fresh cross-rank-aggregated loss
+only exists at a window end, so mid-window micro-steps advance the bar without
+changing the displayed number — at the default of 1 this doesn't apply, every
+step gets a fresh value. Once the loss converges past 4 decimal places, display
+switches from `f"{loss:.4f}"` to scientific notation (`format_loss()`) instead
+of printing a flat, uninformative `"0.0000"`: `loss: 3.100e-08` rather than
+`loss: 0.0000`. Applies everywhere a loss gets printed (the bars, the epoch
+summary, the `--resume` message, "Training complete") so they're always
+consistent with each other.
 
 ### Output structure
 
@@ -443,8 +481,10 @@ source of truth for model architecture. All downstream commands require
 }
 ```
 
-To disable AMP after training starts: set `"amp": false` in `config.json` and
-restart with `--resume`.
+To disable AMP on a fresh run, pass `--no-amp` (or `--init-only --no-amp` to
+just preview the config first). On a run already resuming, hand-edit
+`"amp": false` in `config.json` and restart with `--resume` — `--no-amp` has no
+effect there.
 
 ---
 
@@ -460,6 +500,23 @@ at load time in `MISFITDataset`:
 This allows CT (Hounsfield units) and MRI (arbitrary units) to be mixed in the
 same training batch. The `normalized_masked_mse` loss further normalizes
 per-patch variance for the reconstruction target.
+
+**Load-failure handling**: every path in the index was already confirmed
+loadable by `misfit_index` (bad files are dropped there, never indexed), so a
+load failure inside `MISFITDataset.__getitem__` at train time means something
+changed _since_ indexing — deleted, moved, a transient filesystem error. An
+isolated failure warns (`UserWarning`:
+`"<path>: failed to load (...); substituting a zero volume for this sample (N/3 consecutive failures ...)"`)
+and substitutes a zero-filled tensor for that one sample so the run keeps going.
+`max_load_failures` (default 3) _consecutive_ failures — no successful load in
+between — raise `RuntimeError` and stop the run instead: that's a systemic
+problem (a mount gone away, permissions revoked), not a one-off, and continuing
+would silently train on an escalating fraction of zero-filled "volumes". The
+counter resets to 0 on every successful load and lives on the `Dataset`
+instance, which `persistent_workers=True` keeps alive for the whole run (not
+just one epoch). If a user reports this warning: 1-2 isolated occurrences are
+safe to ignore; if the run stopped with the `RuntimeError`, the filesystem/paths
+need investigating before restarting, not a config change.
 
 ---
 
@@ -506,7 +563,13 @@ is recommended for SwinUNETR-V2 — skipping can cause early instability.
 - `misfit_train` resolves once and persists the effective value to
   `config.json`. `misfit_evaluate` and `misfit_inspect` re-resolve the config
   value against their own hardware (they may run on a different GPU or CPU).
-- Disable entirely by setting `"amp": false` in `config.json`.
+- `--no-amp` requests FP32 directly on a fresh run — set in `__init__`
+  (`self.amp = not getattr(self.args, "no_amp", False)`), so it's the starting
+  point `resolve_amp` sees, not a post-hoc override. Not consulted on `--resume`
+  (saved `config.json` wins there); hand-edit the file instead.
+- `--init-only` writes `config.json` + the results skeleton and returns before
+  model/data/DDP setup — pair it with `--no-amp` to get an AMP-off config with
+  no run/kill/edit/`--resume` dance.
 
 ---
 
@@ -520,10 +583,21 @@ ROCm via the `torch.cuda` shim) selects the device, the process-group backend,
 whether `torch.cuda.set_device` / cuDNN tuning run, and whether DDP gets
 `device_ids`.
 
+`_setup_distributed` calls `torch.cuda.set_device(local_rank)` **before**
+`dist.init_process_group`, and passes
+`device_id=torch.device("cuda", local_rank)` explicitly. Order matters: a NCCL
+group created while every rank is still on the default `cuda:0` binds DDP's
+construction-time param-shape allgather to device 0 on _all_ ranks, so a
+multi-GPU job hangs on the first collective (`rank 0 has inconsistent 0 params`,
+10-min watchdog timeout) — fixed, but if a multi-GPU job still hangs at startup
+after that, it's NCCL peer-to-peer transport (e.g. GPUs spanning two CPU sockets
+on a shared node), not MISFIT; `NCCL_P2P_DISABLE=1` / `NCCL_P2P_LEVEL=NVL` are
+the workarounds.
+
 ```console
-# Single node, 4 GPUs
+# Single node, 4 GPUs — -m needs no shell/PATH (see Kubernetes below)
 torchrun --nproc_per_node=4 \
-    $(which misfit_train) \
+    -m misfit.cli.train_entrypoint \
         --index      /data/index.parquet \
         --results    /runs/exp1 \
         --batch-size 2
@@ -534,7 +608,7 @@ torchrun --nnodes=2 \
          --node_rank=$SLURM_NODEID \
          --master_addr=$MASTER_ADDR \
          --master_port=29500 \
-    $(which misfit_train) \
+    -m misfit.cli.train_entrypoint \
         --index   /data/index.parquet \
         --results /runs/exp1
 ```
@@ -542,6 +616,12 @@ torchrun --nnodes=2 \
 `--batch-size` is per-GPU. Effective global batch =
 `batch_size × world_size × gradient_accumulation_steps`. Scale `--learning-rate`
 linearly when scaling up GPU count.
+
+**Kubernetes**: a pod's `command`/`args` go straight to `execve` — no shell — so
+`$(which misfit_train)` reaches Python as the literal string `$(which`. Use
+`-m misfit.cli.train_entrypoint` (any of the 7 CLIs works this way — each module
+ends with `if __name__ == "__main__"`), or wrap the command in `["bash", "-lc"]`
+if you want `$(...)`/env expansion.
 
 ---
 
@@ -662,7 +742,10 @@ misfit/
   inference/            InferenceRunners; tiled reconstruct pipeline (pad→tile→stitch)
   embedding/            Embedder; EmbedTrainer; aggregators (mean_pool, attention_pool);
                         objectives (classification, contrastive)
-  utils/                console (Rich), io (read/write JSON), progress_bar,
+  utils/                console (Rich), io (read/write JSON),
+                        progress_bar (get_progress_bar; TrainProgressBar /
+                        ValidationProgressBar — mirror mist.utils.progress_bar;
+                        format_loss),
                         hardware (get_accelerator_type / bf16_supported /
                         resolve_amp / autocast_context),
                         normalization (normalize_patchwise / denormalize_patchwise)
