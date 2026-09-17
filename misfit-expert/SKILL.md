@@ -196,6 +196,27 @@ training works but is very slow — intended for tests and small debug runs, and
 it warns once at startup. `misfit_evaluate` / `misfit_inspect` / `misfit_encode`
 / `misfit_embed` already accept `--device cpu`.
 
+### Progress output
+
+Training and validation each show a live Rich progress bar with loss and (for
+training) learning rate refreshed every step — mirrors MIST's `TrainProgressBar`
+/ `ValidationProgressBar` (`misfit.utils.progress_bar`):
+
+```
+Epoch 3/10 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5/5 • 0:00:00 • loss: 0.3000 • lr: 1.e-04
+Validating ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3/3 • 0:00:00 • val_loss: 0.2800
+```
+
+With `--gradient-accumulation-steps > 1`, a fresh cross-rank-aggregated loss
+only exists at a window end, so mid-window micro-steps advance the bar without
+changing the displayed number — at the default of 1 this doesn't apply, every
+step gets a fresh value. Once the loss converges past 4 decimal places, display
+switches from `f"{loss:.4f}"` to scientific notation (`format_loss()`) instead
+of printing a flat, uninformative `"0.0000"`: `loss: 3.100e-08` rather than
+`loss: 0.0000`. Applies everywhere a loss gets printed (the bars, the epoch
+summary, the `--resume` message, "Training complete") so they're always
+consistent with each other.
+
 ### Output structure
 
 ```text
@@ -480,6 +501,23 @@ This allows CT (Hounsfield units) and MRI (arbitrary units) to be mixed in the
 same training batch. The `normalized_masked_mse` loss further normalizes
 per-patch variance for the reconstruction target.
 
+**Load-failure handling**: every path in the index was already confirmed
+loadable by `misfit_index` (bad files are dropped there, never indexed), so a
+load failure inside `MISFITDataset.__getitem__` at train time means something
+changed _since_ indexing — deleted, moved, a transient filesystem error. An
+isolated failure warns (`UserWarning`:
+`"<path>: failed to load (...); substituting a zero volume for this sample (N/3 consecutive failures ...)"`)
+and substitutes a zero-filled tensor for that one sample so the run keeps going.
+`max_load_failures` (default 3) _consecutive_ failures — no successful load in
+between — raise `RuntimeError` and stop the run instead: that's a systemic
+problem (a mount gone away, permissions revoked), not a one-off, and continuing
+would silently train on an escalating fraction of zero-filled "volumes". The
+counter resets to 0 on every successful load and lives on the `Dataset`
+instance, which `persistent_workers=True` keeps alive for the whole run (not
+just one epoch). If a user reports this warning: 1-2 isolated occurrences are
+safe to ignore; if the run stopped with the `RuntimeError`, the filesystem/paths
+need investigating before restarting, not a config change.
+
 ---
 
 ## Loss Functions
@@ -704,7 +742,10 @@ misfit/
   inference/            InferenceRunners; tiled reconstruct pipeline (pad→tile→stitch)
   embedding/            Embedder; EmbedTrainer; aggregators (mean_pool, attention_pool);
                         objectives (classification, contrastive)
-  utils/                console (Rich), io (read/write JSON), progress_bar,
+  utils/                console (Rich), io (read/write JSON),
+                        progress_bar (get_progress_bar; TrainProgressBar /
+                        ValidationProgressBar — mirror mist.utils.progress_bar;
+                        format_loss),
                         hardware (get_accelerator_type / bf16_supported /
                         resolve_amp / autocast_context),
                         normalization (normalize_patchwise / denormalize_patchwise)
