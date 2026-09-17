@@ -11,14 +11,11 @@ docs every time.
 | ------------------------------------- | --------------------------------- | ------------------------------------- |
 | [`mist-expert`][mist]                 | [MIST][mist-repo]                 | 3D medical image segmentation         |
 | [`misfit-expert`][misfit]             | [MISFIT][misfit-repo]             | Imaging foundation-model pretraining  |
-| [`mist-autoresearch-expert`][autores] | [mist-autoresearch][autores-repo] | LLM-driven autoresearch loops on MIST |
 
 [mist]: mist-expert/SKILL.md
 [misfit]: misfit-expert/SKILL.md
-[autores]: mist-autoresearch-expert/SKILL.md
 [mist-repo]: https://github.com/mist-medical/MIST
 [misfit-repo]: https://github.com/mist-medical/MISFIT
-[autores-repo]: https://github.com/mist-medical/mist-autoresearch
 
 ## Usage
 
@@ -71,6 +68,3 @@ The skill body is plain markdown and portable to other coding agents.
   pretrains 3D imaging foundation models via masked autoencoding on unlabeled
   NIfTI files, producing a SwinUNETR-V2 encoder that can transfer into MIST for
   segmentation fine-tuning.
-- **[mist-autoresearch][autores-repo]** — LLM-driven autoresearch loops built on
-  MIST: proposing and scoring configurations, running the agent loop, and
-  interpreting a sweep's results.
