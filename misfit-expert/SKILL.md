@@ -449,7 +449,7 @@ source of truth for model architecture. All downstream commands require
 
 ```json
 {
-  "misfit_version": "0.1.0-alpha",
+  "misfit_version": "0.1.3-alpha",
   "data": {
     "index": "/data/index.parquet"
   },

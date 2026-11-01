@@ -7,10 +7,10 @@ docs every time.
 
 ## Available Skills
 
-| Skill                                 | Tool                              | Description                           |
-| ------------------------------------- | --------------------------------- | ------------------------------------- |
-| [`mist-expert`][mist]                 | [MIST][mist-repo]                 | 3D medical image segmentation         |
-| [`misfit-expert`][misfit]             | [MISFIT][misfit-repo]             | Imaging foundation-model pretraining  |
+| Skill                     | Tool                  | Description                          |
+| ------------------------- | --------------------- | ------------------------------------ |
+| [`mist-expert`][mist]     | [MIST][mist-repo]     | 3D medical image segmentation        |
+| [`misfit-expert`][misfit] | [MISFIT][misfit-repo] | Imaging foundation-model pretraining |
 
 [mist]: mist-expert/SKILL.md
 [misfit]: misfit-expert/SKILL.md
