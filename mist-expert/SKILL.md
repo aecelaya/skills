@@ -343,15 +343,14 @@ Key rules:
   and on AMD GPUs with matrix hardware — CDNA (MI100/200/300) and RDNA3+ (RX
   7000 series and newer). MIST resolves this against the detected hardware at
   train time (`hardware.resolve_amp()`) and downgrades to FP32 automatically
-  with a warning when BF16 isn't supported — pre-Ampere NVIDIA cards (V100,
-  T4, RTX 20xx), pre-RDNA3 AMD cards (RX 5000/6000 series), and CPU-only
-  hardware all hit this path. `bf16_supported()` checks ROCm's `gcnArchName`
-  against a known-good allow-list rather than trusting
-  `torch.cuda.is_bf16_supported()`, which reports True on RDNA1/2 too (via
-  slow ALU emulation, not matrix hardware — confirmed to regress speed on a
-  real RX 6800-class card). It never errors; set `"amp": false` explicitly
-  only to silence the warning. AMP is propagated to validation, fold testing,
-  and `mist_predict` inference automatically.
+  with a warning when BF16 isn't supported — pre-Ampere NVIDIA cards (V100, T4,
+  RTX 20xx), pre-RDNA3 AMD cards (RX 5000/6000 series), and CPU-only hardware
+  all hit this path. `bf16_supported()` checks ROCm's `gcnArchName` against a
+  known-good allow-list rather than trusting `torch.cuda.is_bf16_supported()`,
+  which reports True on RDNA1/2 too (via slow ALU emulation, not matrix hardware
+  — confirmed to regress speed on a real RX 6800-class card). It never errors;
+  set `"amp": false` explicitly only to silence the warning. AMP is propagated
+  to validation, fold testing, and `mist_predict` inference automatically.
 - `inference.inferer.params.sw_batch_size` controls how many sliding-window
   patches are processed per forward pass (default: `2 × batch_size_per_gpu`).
   Increase for higher GPU utilisation on high-VRAM cards; decrease if patch
@@ -359,14 +358,15 @@ Key rules:
 - `grad_clip_norm` is not exposed as a CLI flag; edit `config.json` directly.
 - `training.hardware.master_port` defaults to `12345`; change it when running
   multiple concurrent MIST jobs on the same machine to avoid port conflicts.
-- `training.hardware.num_cpu_workers` controls the active data loader's
-  internal CPU thread/worker count (DALI threads, or the generic loader's
-  `DataLoader` workers — whichever is active, see below); default: 8. Not
-  the same as `--num-workers-*` flags.
+- `training.hardware.num_cpu_workers` controls the active data loader's internal
+  CPU thread/worker count (DALI threads, or the generic loader's `DataLoader`
+  workers — whichever is active, see below); default: 8. Not the same as
+  `--num-workers-*` flags.
 - `training.hardware.data_loader` and `training.hardware.communication_backend`
-  both default to `"auto"` in a freshly analyzed `config.json` and are
-  resolved once, at train time, against the detected accelerator (CUDA, AMD
-  ROCm, or CPU) — see [Accelerator Detection and Data Loaders](#accelerator-detection-and-data-loaders)
+  both default to `"auto"` in a freshly analyzed `config.json` and are resolved
+  once, at train time, against the detected accelerator (CUDA, AMD ROCm, or CPU)
+  — see
+  [Accelerator Detection and Data Loaders](#accelerator-detection-and-data-loaders)
   below. An explicit non-`"auto"` value is always respected and never
   overridden.
 
@@ -769,8 +769,8 @@ recommendations tailored to your specific dataset.
 MIST auto-detects its accelerator (NVIDIA CUDA, AMD ROCm, or CPU-only) via
 `mist.utils.hardware.get_accelerator_type()` — CUDA and ROCm both go through
 `torch.cuda.*` (ROCm reuses that namespace as a compatibility shim);
-`torch.version.hip` (a version string on ROCm, `None` otherwise) is what
-tells them apart. Nothing needs to be set for this — it's automatic.
+`torch.version.hip` (a version string on ROCm, `None` otherwise) is what tells
+them apart. Nothing needs to be set for this — it's automatic.
 
 Two `config.json` fields get resolved against the detected accelerator, once,
 the first time `mist_train` runs, and the resolved value is persisted back to
@@ -780,23 +780,22 @@ the first time `mist_train` runs, and the resolved value is persisted back to
   pipeline) on CUDA hardware where it's installed; MIST's own generic,
   pure-PyTorch data loader everywhere else — AMD ROCm, CPU-only, or a CUDA
   machine that skipped installing DALI (`pip install "mist-medical[dali]"`,
-  recommended on NVIDIA GPUs; `pip install "mist-medical[train]"` is kept as
-  an identical alias for users on pre-CPU/ROCm-support MIST releases). The
-  generic loader
-  (`mist/data_loading/generic_loader.py`) implements the same augmentations (flips, zoom, noise,
-  blur, brightness, contrast) on CPU instead of in a GPU pipeline — slower
-  per batch, no NVIDIA-specific dependency. If CUDA hardware is detected but
-  DALI isn't registered (not installed), MIST warns and falls back to the
-  generic loader rather than raising.
-- **`training.hardware.communication_backend`**: `"nccl"` on both CUDA and
-  ROCm (ROCm routes `"nccl"` to RCCL transparently — no code change needed),
-  `"gloo"` on CPU-only hardware.
+  recommended on NVIDIA GPUs; `pip install "mist-medical[train]"` is kept as an
+  identical alias for users on pre-CPU/ROCm-support MIST releases). The generic
+  loader (`mist/data_loading/generic_loader.py`) implements the same
+  augmentations (flips, zoom, noise, blur, brightness, contrast) on CPU instead
+  of in a GPU pipeline — slower per batch, no NVIDIA-specific dependency. If
+  CUDA hardware is detected but DALI isn't registered (not installed), MIST
+  warns and falls back to the generic loader rather than raising.
+- **`training.hardware.communication_backend`**: `"nccl"` on both CUDA and ROCm
+  (ROCm routes `"nccl"` to RCCL transparently — no code change needed), `"gloo"`
+  on CPU-only hardware.
 
 Both default to `"auto"` in a freshly analyzed `config.json`; an explicit
-non-`"auto"` value already in `config.json` is always respected, never
-silently overridden. CPU-only training is single-process only — no
-multi-CPU-process distributed training (multi-GPU DDP, on either CUDA or
-ROCm, works as described below).
+non-`"auto"` value already in `config.json` is always respected, never silently
+overridden. CPU-only training is single-process only — no multi-CPU-process
+distributed training (multi-GPU DDP, on either CUDA or ROCm, works as described
+below).
 
 Loader/backend selection is implemented via a small registry
 (`mist.data_loading.data_loader_registry`), the same pattern used for models,
@@ -808,16 +807,16 @@ MIST uses PyTorch DDP, on both NVIDIA CUDA and AMD ROCm GPUs. It automatically
 uses all GPUs visible to the process.
 
 - **Workstation**: restrict GPUs with `CUDA_VISIBLE_DEVICES=0,1 mist_train ...`
-  (this also works on ROCm — PyTorch's ROCm build recognizes it directly;
-  don't combine it with `ROCR_VISIBLE_DEVICES`/`HIP_VISIBLE_DEVICES` at the
-  same time).
+  (this also works on ROCm — PyTorch's ROCm build recognizes it directly; don't
+  combine it with `ROCR_VISIBLE_DEVICES`/`HIP_VISIBLE_DEVICES` at the same
+  time).
 - **SLURM/LSF/PBS**: the scheduler sets `CUDA_VISIBLE_DEVICES` automatically. No
   extra flags needed.
 - **Port conflicts** (multiple concurrent jobs on same machine): change
   `training.hardware.master_port` in `config.json` to a unique value per job.
 - **Data loader thread/worker count**: tune `training.hardware.num_cpu_workers`
-  in `config.json` (default: 8) if your machine has significantly more or
-  fewer CPU cores. Applies to whichever loader is active (DALI or generic).
+  in `config.json` (default: 8) if your machine has significantly more or fewer
+  CPU cores. Applies to whichever loader is active (DALI or generic).
 
 **Distributed training across nodes (one fold per node):** point every node at
 the same shared `--results` directory and restrict each one to its own fold(s)
