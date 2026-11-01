@@ -411,9 +411,6 @@ discarded). Components:
 - **MAEDecoder**: Lightweight `ConvTranspose3d` stack — 5 upsampling steps
   restore original resolution. Channel schedule halves at each step, floored
   at 32.
-- **SpacingEmbedding**: Sinusoidal encoding of
-  `(spacing_d, spacing_h, spacing_w)` projected to bottleneck channels. Added to
-  bottleneck before decoding so the model is aware of physical voxel size.
 - **mask_token**: Learnable scalar parameter broadcast over spatial dims.
 
 **Masking strategy**: SimMIM-style — applied at the image level before encoding
@@ -431,13 +428,18 @@ randomly selects `mask_ratio` fraction.
 
 | Variant | `--model`         | `feature_size` | Encoder params | Full MAE params |
 | ------- | ----------------- | -------------- | -------------- | --------------- |
-| Small   | `swinunetr-small` | 24             | ~4.8M          | ~7.2M           |
-| Base    | `swinunetr-base`  | 48             | ~18.6M         | ~27.8M          |
-| Large   | `swinunetr-large` | 96             | ~73.9M         | ~110.3M         |
+| Small   | `swinunetr-small` | 24             | ~4.8M          | ~7.0M           |
+| Base    | `swinunetr-base`  | 48             | ~18.6M         | ~27.1M          |
+| Large   | `swinunetr-large` | 96             | ~73.9M         | ~107.7M         |
 
 "Encoder params" is the `swinViT` backbone transferred to MIST
 (`encoder_weights.pt`); "Full MAE params" additionally includes the lightweight
-conv decoder and spacing embedding used only during pretraining.
+conv decoder and mask token used only during pretraining.
+
+The model does not use voxel spacing: `spacing_d/h/w` stay in the index as
+metadata, and crops are taken at native resolution. The `SpacingEmbedding`
+decoder conditioning was removed after 0.1.3-alpha; older checkpoints still load
+(their `spacing_embed.*` keys are ignored).
 
 ---
 
