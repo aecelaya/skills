@@ -405,7 +405,8 @@ Notes on the newer architectures (added in 2.4.0):
   paper). Primus (V1) exists mainly for loading nnssl ViT checkpoints and
   masked-autoencoder pretraining. Sizes (depth, heads, dim): small (12, 6, 396),
   base (12, 12, 792), medium (16, 12, 864, the paper's default), large (24, 16,
-  1056), x (40, 16, 1056; the nnFoundationViT encoder, ~540M params). Primus has
+  1056), x (40, 16, 1056; the nnFoundationViT encoder, ~550M encoder params at a
+  192³ patch, since the position embedding scales with patch size). Primus has
   **no deep supervision**, and its learned position embedding is sized for
   `patch_size`, so the model only accepts inputs of exactly that size (sliding
   window inference handles this automatically).
@@ -678,8 +679,8 @@ mist_train --results /path/to/results --numpy /path/to/numpy \
 ```
 
 **Fine-tune from nnFoundationCNN** (set `spatial_config.target_spacing` to
-`[1, 1, 1]` and a patch of at least 128³ in `config.json` before preprocessing
-to transfer the whole encoder):
+`[1, 1, 1]` and `patch_size` to `[192, 192, 192]` in `config.json` before
+preprocessing; any patch of at least 128³ transfers the whole encoder):
 
 ```bash
 wget https://huggingface.co/MIC-DKFZ/nnFoundationCNN/resolve/main/checkpoint_final.pth \
@@ -797,38 +798,63 @@ controls the first convolution:
 
 ### Pretrained encoders that load directly
 
-| Checkpoint                                                                  | MIST model | Notes                                                                                                                                                    |
-| --------------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [nnFoundationCNN](https://huggingface.co/MIC-DKFZ/nnFoundationCNN) (410 MB) | `resenc`   | nnssl ResEnc-L, MAE-pretrained at 1 mm isotropic on 192³ patches, single channel. CC BY-SA 4.0. All 448 encoder tensors load at 1 mm with a patch ≥128³. |
-| [nnFoundationViT](https://huggingface.co/MIC-DKFZ/nnFoundationViT) (2.7 GB) | `primus-x` | nnssl PrimusX (40 layers, dim 1056), all 925 encoder tensors load; position embedding resized for other patch sizes. Needs a ≥40 GB GPU to fine-tune.    |
-| MISFIT `models/encoder_weights.pt`                                          | same model | Pass MISFIT's `config.json` as `--pretrained-config`. `resenc` and `swinunetr-*` encoders.                                                               |
+| Checkpoint                                                                  | MIST model | Notes                                                                                                                                                                                                       |
+| --------------------------------------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [nnFoundationCNN](https://huggingface.co/MIC-DKFZ/nnFoundationCNN) (410 MB) | `resenc`   | ResEnc-L (6 stages, 32–320 filters, ~90M encoder params), single channel. CC BY-SA 4.0. All 448 encoder tensors load at 1 mm isotropic with a patch ≥128³.                                                  |
+| [nnFoundationViT](https://huggingface.co/MIC-DKFZ/nnFoundationViT) (2.7 GB) | `primus-x` | PrimusX (40 layers, 16 heads, dim 1056, 8³ tokens). All 925 encoder tensors load; the position embedding (pretrained at 192³) is resized for other patch sizes. The checkpoint's MAE decoder is not loaded. |
+| MISFIT `models/encoder_weights.pt`                                          | same model | Pass MISFIT's `config.json` as `--pretrained-config`. `resenc` and `swinunetr-*` encoders.                                                                                                                  |
 
-To transfer **all** of nnFoundationCNN, match its pretraining geometry in
-`config.json` after `mist_analyze` and before `mist_preprocess`:
+**How nnFoundation was pretrained** (verified from the checkpoints' nnssl
+adaptation plans, nnssl's trainer source, and the paper,
+[Harsy et al., 2026](https://arxiv.org/abs/2609.26924)): both models are masked
+autoencoders trained with nnssl on 2.1 million CT, MRI, and PET volumes from 125
+datasets, on single-channel `192 × 192 × 192` patches. Preprocessing used
+nnssl's `noresample` configuration: **no resampling** (each scan at its native
+resolution; the median spacing of the data is 1 mm isotropic), crop to nonzero,
+z-score normalization without a mask or clipping. The checkpoints recommend a
+192³ fine-tuning patch (`recommended_downstream_patchsize`). Don't claim
+nnFoundation was pretrained "at 1 mm isotropic" or on a single modality or body
+region: it wasn't resampled, the data spans CT, MRI, and PET, and the body
+regions aren't stated in the paper's abstract.
+
+To transfer **all** of nnFoundationCNN in MIST, set in `config.json` after
+`mist_analyze` and before `mist_preprocess`:
 `spatial_config.target_spacing = [1.0, 1.0, 1.0]` and a `patch_size` of at least
-128 per axis (lower `training.batch_size_per_gpu` to 1 on a 16 GB GPU at 128³ in
-FP32). Anisotropic spacing changes some `resenc` kernel shapes (those layers
-keep random init), and a patch below 128³ has fewer than six stages (the deepest
-pretrained stage is unused; MIST warns). nnFoundation was pretrained on z-scored
-intensities without clipping; MIST's CT normalization clips to a window first,
-which fine-tuning generally absorbs.
+128 per axis (192³ matches pretraining). MIST always resamples to one target
+spacing, so it has no equivalent of `noresample`; 1 mm isotropic gives every
+stage 3³ kernels and isotropic strides like nnFoundationCNN and matches the
+pretraining data's median spacing. Anisotropic spacing changes some `resenc`
+kernel shapes (those layers keep random init), and a patch below 128³ has fewer
+than six stages (the deepest pretrained stage is unused; MIST warns). MIST's CT
+normalization clips to a window before z-scoring, unlike nnFoundation's
+pretraining; its effect on fine-tuning hasn't been measured.
 
-### Fine-tuning recipe
+The transfer summary's "scalar parameters" figure double-counts in MIST 2.4.0:
+ResEnc registers each convolution under two names that share one tensor (`conv`
+and `all_modules.0`), so nnFoundationCNN reports ~180.6M instead of the real
+~90.3M. Only the printout is wrong; the weights load correctly.
 
-A pretrained encoder needs gentler training than random init, because the random
-decoder produces large, noisy early gradients that can overwrite pretrained
-features. Set these in the run's `config.json` (or via the CLI flags):
+### Fine-tuning settings
 
-- `training.learning_rate`: lower than the from-scratch default of `1e-3`, e.g.
-  `3e-4` (`--learning-rate`).
-- `training.warmup_epochs`: longer warmup; LR ramps linearly from 1% of the
-  target to the full value, then the main schedule runs over the remaining
-  epochs (`--warmup-epochs`). Roughly 5–10% of the epochs is a good start.
+Neither nnssl nor MIST publishes tuned fine-tuning hyperparameters for these
+checkpoints, so present any learning rate or warmup values as things to
+experiment with, not recommendations. The knobs are `training.learning_rate`
+(`--learning-rate`; MIST default `1e-3`) and `training.warmup_epochs`
+(`--warmup-epochs`; LR ramps linearly from 1% of the target, then the main
+schedule runs over the remaining epochs). A warmup protects pretrained features
+from the randomly initialized decoder's large early gradients. To measure what
+pretraining adds on a task, train the same config with and without
+`--pretrained-weights` and compare with `mist_rank`.
 
-These are starting points, not tuned values. The Colab notebook
+**Verified reference run** — the Colab notebook
 [`examples/mist_nnfoundation_spleen_demo.ipynb`](https://colab.research.google.com/github/mist-medical/MIST/blob/main/examples/mist_nnfoundation_spleen_demo.ipynb)
-walks through fine-tuning nnFoundationCNN on MSD spleen CT versus training from
-scratch, including these settings.
+fine-tunes nnFoundationCNN on MSD spleen CT (fold 0 only): 1 mm isotropic, 192³
+patch, batch size 2, 25 epochs × 100 steps, 5 warmup epochs, default learning
+rate, TTA off. On a Colab G4 runtime (NVIDIA Blackwell, 96 GB, BF16) it trained
+at ~42 s/epoch (~25 min) and reached a median Dice of 0.87. Preprocessing at 1
+mm took ~2.5 min on the G4 and ~30 min on a free T4 (2 CPU cores). A much
+shorter run (10 × 100 steps at 128³, batch 1) reached only ~0.25 mean Dice, so
+very short schedules underfit badly.
 
 ---
 
