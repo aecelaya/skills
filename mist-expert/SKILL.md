@@ -1004,6 +1004,17 @@ uses all GPUs visible to the process.
   in `config.json` (default: 8) if your machine has significantly more or fewer
   CPU cores. Applies to whichever loader is active (DALI or generic).
 
+**What extra GPUs change:** more GPUs let MIST train on more data in the same or
+a similar amount of time; they don't shorten the run by default.
+`batch_size_per_gpu` applies to each GPU, so the global batch grows with the
+number of GPUs, while steps per epoch usually stay at `min_steps_per_epoch`. Two
+GPUs with a batch size of 2 use a global batch of 4 and train on twice as many
+patches per epoch. The extra data isn't guaranteed to improve accuracy. To
+finish sooner instead, lower `training.min_steps_per_epoch` in proportion, such
+as from `250` to `125` on two GPUs. The step count won't go below the number of
+training cases divided by the global batch. Validation splits its cases across
+GPUs, so it gets faster either way.
+
 **Distributed training across nodes (one fold per node):** point every node at
 the same shared `--results` directory and restrict each one to its own fold(s)
 with `--folds` (e.g. `mist_train --folds 0 --results /shared/results` on node 0,
