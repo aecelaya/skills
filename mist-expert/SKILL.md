@@ -361,22 +361,22 @@ Key rules:
   them and records what it planned for under `planning`.
 - `patch_overlap` must be in `[0, 1)` — `1.0` is invalid.
 - `training.amp` is `"auto"` by default. On a GPU with hardware BF16, the first
-  `mist_train` times real training steps on random data in BF16 and FP32 and
-  saves the choice as `true` or `false`. FP32 wins only if it keeps the same
-  patch, fits in memory, and is at least 1.10 times faster; BF16 is kept
-  otherwise, including if the test can't finish. Without hardware BF16, `"auto"`
-  picks FP32 with no warning. BF16 is hardware-accelerated on NVIDIA Ampere or
-  newer GPUs (A100, RTX 30xx, H100) and on AMD GPUs with matrix hardware — CDNA
-  (MI100/200/300) and RDNA3+ (RX 7000 series and newer). An explicit `true` is
-  resolved against the detected hardware at train time
-  (`hardware.resolve_amp()`) and downgrades to FP32 with a warning when BF16
-  isn't supported — pre-Ampere NVIDIA cards (V100, T4, RTX 20xx), pre-RDNA3 AMD
-  cards (RX 5000/6000 series), and CPU-only hardware all hit this path.
-  `bf16_supported()` checks ROCm's `gcnArchName` against a known-good allow-list
-  rather than trusting `torch.cuda.is_bf16_supported()`, which reports True on
-  RDNA1/2 too (via slow ALU emulation, not matrix hardware — confirmed to
-  regress speed on a real RX 6800-class card). AMP is propagated to validation,
-  fold testing, and `mist_predict` inference automatically.
+  `mist_train` times real training steps on random data in BF16 and FP32,
+  compiling the model if training will, and saves the choice as `true` or
+  `false`. FP32 wins only if it keeps the same patch, fits in memory, and is at
+  least 1.10 times faster; BF16 is kept otherwise, including if the test can't
+  finish. Without hardware BF16, `"auto"` picks FP32 with no warning. BF16 is
+  hardware-accelerated on NVIDIA Ampere or newer GPUs (A100, RTX 30xx, H100) and
+  on AMD GPUs with matrix hardware — CDNA (MI100/200/300) and RDNA3+ (RX 7000
+  series and newer). An explicit `true` is resolved against the detected
+  hardware at train time (`hardware.resolve_amp()`) and downgrades to FP32 with
+  a warning when BF16 isn't supported — pre-Ampere NVIDIA cards (V100, T4, RTX
+  20xx), pre-RDNA3 AMD cards (RX 5000/6000 series), and CPU-only hardware all
+  hit this path. `bf16_supported()` checks ROCm's `gcnArchName` against a
+  known-good allow-list rather than trusting `torch.cuda.is_bf16_supported()`,
+  which reports True on RDNA1/2 too (via slow ALU emulation, not matrix hardware
+  — confirmed to regress speed on a real RX 6800-class card). AMP is propagated
+  to validation, fold testing, and `mist_predict` inference automatically.
 - `training.compile` compiles the model with `torch.compile` during training.
   New configs set it to `true`; configs from before this setting don't have the
   key and train without it. It has no CLI flag: to change it, edit
