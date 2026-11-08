@@ -392,9 +392,12 @@ Key rules:
   the loss in FP32 from `.float()` outputs outside autocast, and keeps
   `OPTIMIZER_EPS` at 1e-8 (AdamW state is FP32). `_leave_fp16_if_failing`
   switches the rest of a fold to BF16 or FP32 after 20 consecutive NaN/inf
-  losses or a gradient scale below 1; other folds start in FP16 again. `"auto"`
-  doesn't consider FP16 yet; a tiered speed test (BF16 vs FP32, then FP16) is
-  planned after stability runs.
+  losses or a gradient scale below 1; other folds start in FP16 again. The
+  planner estimates FP16 activations at `FP16_ACTIVATION_FACTOR` (0.80 of FP32,
+  or the network's BF16 factor if higher; measured 0.62–0.64 on a T4, 0.80 on an
+  A100) vs BF16's 0.55, via `patch_planning.activation_factor`. On a T4, FP16
+  trained `nnunet-plain` 3.5–4× faster than FP32. `"auto"` doesn't consider FP16
+  yet; a tiered speed test (BF16 vs FP32, then FP16) comes next.
 - `training.compile` compiles the model with `torch.compile` during training.
   New configs set it to `true`; configs from before this setting don't have the
   key and train without it. It has no CLI flag: to change it, edit
