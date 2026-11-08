@@ -385,6 +385,16 @@ Key rules:
   which reports True on RDNA1/2 too (via slow ALU emulation, not matrix hardware
   — confirmed to regress speed on a real RX 6800-class card). AMP is propagated
   to validation, fold testing, and `mist_predict` inference automatically.
+- `training.amp: "fp16"` (opt in, 2.5.0) trains in FP16 on any GPU, for
+  pre-Ampere cards with FP16 tensor cores (V100, T4, Quadro RTX 6000); Pascal
+  consumer cards run FP16 slowly. It uses `torch.amp.GradScaler` (unscale before
+  clipping; scale saved in checkpoints as `grad_scaler_state_dict`), computes
+  the loss in FP32 from `.float()` outputs outside autocast, and keeps
+  `OPTIMIZER_EPS` at 1e-8 (AdamW state is FP32). `_leave_fp16_if_failing`
+  switches the rest of a fold to BF16 or FP32 after 20 consecutive NaN/inf
+  losses or a gradient scale below 1; other folds start in FP16 again. `"auto"`
+  doesn't consider FP16 yet; a tiered speed test (BF16 vs FP32, then FP16) is
+  planned after stability runs.
 - `training.compile` compiles the model with `torch.compile` during training.
   New configs set it to `true`; configs from before this setting don't have the
   key and train without it. It has no CLI flag: to change it, edit
