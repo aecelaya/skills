@@ -368,36 +368,40 @@ Key rules:
   for `patch_size` and `batch_size_per_gpu`; the first `mist_train` replaces
   them and records what it planned for under `planning`.
 - `patch_overlap` must be in `[0, 1)` — `1.0` is invalid.
-- `training.amp` is `"auto"` by default. On a GPU with hardware BF16, the first
-  `mist_train` times real training steps on random data in BF16 and FP32,
-  compiling the model if training will, and saves the choice as `true` or
-  `false`. FP32 wins only if it keeps the same patch, fits in memory, and is at
-  least 1.10 times faster; BF16 is kept otherwise, including if the test can't
-  finish. Without hardware BF16, `"auto"` picks FP32 with no warning. BF16 is
-  hardware-accelerated on NVIDIA Ampere or newer GPUs (A100, RTX 30xx, H100) and
-  on AMD GPUs with matrix hardware — CDNA (MI100/200/300) and RDNA3+ (RX 7000
-  series and newer). An explicit `true` is resolved against the detected
-  hardware at train time (`hardware.resolve_amp()`) and downgrades to FP32 with
-  a warning when BF16 isn't supported — pre-Ampere NVIDIA cards (V100, T4, RTX
-  20xx), pre-RDNA3 AMD cards (RX 5000/6000 series), and CPU-only hardware all
-  hit this path. `bf16_supported()` checks ROCm's `gcnArchName` against a
-  known-good allow-list rather than trusting `torch.cuda.is_bf16_supported()`,
-  which reports True on RDNA1/2 too (via slow ALU emulation, not matrix hardware
-  — confirmed to regress speed on a real RX 6800-class card). AMP is propagated
-  to validation, fold testing, and `mist_predict` inference automatically.
-- `training.amp: "fp16"` (opt in, 2.5.0) trains in FP16 on any GPU, for
-  pre-Ampere cards with FP16 tensor cores (V100, T4, Quadro RTX 6000); Pascal
-  consumer cards run FP16 slowly. It uses `torch.amp.GradScaler` (unscale before
-  clipping; scale saved in checkpoints as `grad_scaler_state_dict`), computes
-  the loss in FP32 from `.float()` outputs outside autocast, and keeps
-  `OPTIMIZER_EPS` at 1e-8 (AdamW state is FP32). `_leave_fp16_if_failing`
-  switches the rest of a fold to BF16 or FP32 after 20 consecutive NaN/inf
-  losses or a gradient scale below 1; other folds start in FP16 again. The
-  planner estimates FP16 activations at `FP16_ACTIVATION_FACTOR` (0.80 of FP32,
-  or the network's BF16 factor if higher; measured 0.62–0.64 on a T4, 0.80 on an
-  A100) vs BF16's 0.55, via `patch_planning.activation_factor`. On a T4, FP16
-  trained `nnunet-plain` 3.5–4× faster than FP32. `"auto"` doesn't consider FP16
-  yet; a tiered speed test (BF16 vs FP32, then FP16) comes next.
+- `training.amp` is `"auto"` by default. On a GPU, the first `mist_train` times
+  real training steps on random data (`precision_test.choose_precision`),
+  compiling the model if training will, and saves `true`, `false`, or `"fp16"`.
+  Tiers: with hardware BF16, BF16 vs FP32, then FP16 only if BF16 isn't at least
+  1.10× faster than FP32 (some old A100s run BF16 slowly); without it, FP32 vs
+  FP16. The default (BF16, else FP32) is kept unless another precision keeps the
+  same patch, fits in memory, and is at least `PRECISION_MIN_SPEEDUP` (1.10×)
+  faster in samples per second; it's also kept if its own timing fails. No GPU:
+  FP32, no test. BF16 is hardware-accelerated on NVIDIA Ampere or newer GPUs
+  (A100, RTX 30xx, H100) and on AMD GPUs with matrix hardware — CDNA
+  (MI100/200/300) and RDNA3+ (RX 7000 series and newer). An explicit `true` is
+  resolved against the detected hardware at train time
+  (`hardware.resolve_amp()`) and downgrades to FP32 with a warning when BF16
+  isn't supported — pre-Ampere NVIDIA cards (V100, T4, RTX 20xx), pre-RDNA3 AMD
+  cards (RX 5000/6000 series), and CPU-only hardware all hit this path.
+  `bf16_supported()` checks ROCm's `gcnArchName` against a known-good allow-list
+  rather than trusting `torch.cuda.is_bf16_supported()`, which reports True on
+  RDNA1/2 too (via slow ALU emulation, not matrix hardware — confirmed to
+  regress speed on a real RX 6800-class card). AMP is propagated to validation,
+  fold testing, and `mist_predict` inference automatically.
+- `training.amp: "fp16"` (2.5.0, set by hand or chosen by `"auto"`) trains in
+  FP16 on any GPU, for pre-Ampere cards with FP16 tensor cores (V100, T4, Quadro
+  RTX 6000); Pascal consumer cards run FP16 slowly. It uses
+  `torch.amp.GradScaler` (unscale before clipping; scale saved in checkpoints as
+  `grad_scaler_state_dict`), computes the loss in FP32 from `.float()` outputs
+  outside autocast, and keeps `OPTIMIZER_EPS` at 1e-8 (AdamW state is FP32).
+  `_leave_fp16_if_failing` switches the rest of a fold to BF16 or FP32 after 20
+  consecutive NaN/inf losses or a gradient scale below 1; other folds start in
+  FP16 again. The planner estimates FP16 activations at `FP16_ACTIVATION_FACTOR`
+  (0.80 of FP32, or the network's BF16 factor if higher; measured 0.62–0.64 on a
+  T4, 0.80 on an A100) vs BF16's 0.55, via `patch_planning.activation_factor`.
+  On a T4, FP16 trained `nnunet-plain` 3.5–4× faster than FP32. The A100's
+  higher FP16 memory comes from `cudnn.benchmark` picking algorithms with large
+  workspaces (with it off, FP16 and BF16 peak alike at the same speed).
 - `training.compile` compiles the model with `torch.compile` during training.
   New configs set it to `true`; configs from before this setting don't have the
   key and train without it. It has no CLI flag: to change it, edit
