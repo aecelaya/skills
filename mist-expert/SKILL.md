@@ -435,7 +435,7 @@ Key rules:
 
 | Key                                | Architecture                                               |
 | ---------------------------------- | ---------------------------------------------------------- |
-| `nnunet-plain`                     | nnU-Net's `PlainConvUNet` (default)                        |
+| `nnunet-plain`                     | Plain convolutional U-Net (default)                        |
 | `nnunet-res`                       | Residual nnU-Net                                           |
 | `nnunet`                           | Same network as `nnunet-res`; name kept for compatibility  |
 | `nnunet-pocket`                    | nnU-Net with constant 32 filters (~700K params)            |
@@ -449,10 +449,10 @@ Key rules:
 
 Notes on the newer architectures:
 
-- **`nnunet-plain`** (added in 2.5.0) follows nnU-Net's topology rules: no depth
-  limit, and an axis is downsampled only when its spacing is under twice the
-  finest spacing among axes that can still be downsampled. Its parameter names
-  match nnU-Net's.
+- **`nnunet-plain`** (added in 2.5.0): two plain convolutions per stage, no
+  depth limit, and an axis is downsampled only when its spacing is under twice
+  the finest spacing among axes that can still be downsampled. Its parameter
+  names match nnU-Net's `PlainConvUNet`, so those checkpoints load directly.
 - **`resenc`** is the Residual Encoder UNet from _nnU-Net Revisited_ (Isensee et
   al., 2024): ResNet-D blocks `(1, 3, 4, 6, 6, 6)` per stage, filters 32 → 320,
   plain UNet decoder, deep supervision. It uses the same adaptive topology as
@@ -778,14 +778,12 @@ results/
 
 The first `mist_train` plans whatever is still `"auto"`, for a memory budget,
 network, and precision (`mist/training/patch_planning.py`).
-`training.gpu_memory_budget_gb` defaults to 8 and uses nnU-Net 2.8.1's rule for
-its 8 GB target: one sample may have at most 560M activations (as
-`estimate_network` counts them, which matches nnU-Net's
-`compute_conv_feature_map_size`) per 8 GiB at batch 2, whatever the precision
-(`activation_limit`). Networks with more bytes per activation than the default
-(Swin) get a proportionally lower limit. The plan must also fit 90% of the GPU
-by MIST's byte estimate. `null` plans for 90% of the GPU instead; configs
-without the key get 8. LiTS and BraTS-sized data get nnU-Net's 128³ in BF16 or
+`training.gpu_memory_budget_gb` defaults to 8: one sample may have at most 560M
+activations (as `estimate_network` counts them) per 8 GiB at batch 2, whatever
+the precision (`activation_limit`). Networks with more bytes per activation than
+the default (Swin) get a proportionally lower limit. The plan must also fit 90%
+of the GPU by MIST's byte estimate. `null` plans for 90% of the GPU instead;
+configs without the key get 8. LiTS and BraTS-sized data get 128³ in BF16 or
 FP32 (FP32 about 11 GiB vs 6.5). Unbudgeted, LiTS on a 40 GB A100 got 256 × 224
 × 224 and ran out of memory in the first step (one convolution asked for 41
 GiB); a budget of 40 gives the same patch. The budget is saved as
@@ -1073,9 +1071,9 @@ Say so if a user is on a released version, since 2.4.0 behaves differently.
 - **Planning at training:** the patch and batch size are planned at the first
   `mist_train` instead of at analysis. New runs may get different sizes; configs
   with values keep them.
-- **Target spacing** follows nnU-Net's anisotropy rule: the coarsest axis moves
-  from its median to its 10th percentile only if its spacing is over 3 times the
-  next coarsest axis and its median voxel count is under a third of the smallest
+- **Target spacing** uses a new anisotropy rule: the coarsest axis moves from
+  its median to its 10th percentile only if its spacing is over 3 times the next
+  coarsest axis and its median voxel count is under a third of the smallest
   other axis, and it never goes finer than the next coarsest axis. Existing
   configs keep their values.
 - **Saved model:** the final epoch by default instead of the lowest held-out
@@ -1084,11 +1082,11 @@ Say so if a user is on a released version, since 2.4.0 behaves differently.
   the argmax, including for models trained with earlier versions. Validation and
   inference use up to 4 patches at once and recover from running out of GPU
   memory.
-- **Augmentation** follows nnU-Net's default transforms: rotation, scaling from
-  0.7 to 1.4 (replacing zoom), low resolution, and gamma are new, and noise,
-  blur, brightness, contrast, and flips use nnU-Net's probabilities and ranges.
-  Missing transform keys mean enabled, so older configs get the new transforms;
-  their `zoom` key is read as `scaling`.
+- **Augmentation:** rotation, scaling from 0.7 to 1.4 (replacing zoom), low
+  resolution, and gamma are new, and noise, blur, brightness, contrast, and
+  flips have new probabilities and ranges. Missing transform keys mean enabled,
+  so older configs get the new transforms; their `zoom` key is read as
+  `scaling`.
 - **New options and warnings:** `training.validate_every` and
   `--validate-every`, plus warnings for config mistakes and for fewer than 5
   validation cases.
