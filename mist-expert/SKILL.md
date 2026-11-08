@@ -117,6 +117,13 @@ Accepts all flags from `mist_analyze`, `mist_preprocess`, and `mist_train`.
 --overwrite               Overwrite existing preprocessed data
 ```
 
+Output: `images/`, `labels/`, optional `dtms/`, and `foreground/`, which holds
+each case's label-class locations (`.npz`, up to 10,000 voxels per class) so the
+generic loader can center patches on foreground without scanning labels. Since
+2.5.0, labels are saved in C order; older data (Fortran-order labels, no
+`foreground/`) still trains but warns, and DALI is much slower on large images
+with it. Rerun `mist_preprocess` to fix it.
+
 ### `mist_train`
 
 ```
