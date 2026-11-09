@@ -119,10 +119,11 @@ Accepts all flags from `mist_analyze`, `mist_preprocess`, and `mist_train`.
 
 Output: `images/`, `labels/`, optional `dtms/`, and `foreground/`, which holds
 each case's label-class locations (`.npz`, up to 10,000 voxels per class) so the
-generic loader can center patches on foreground without scanning labels. Since
-2.5.0, labels are saved in C order; older data (Fortran-order labels, no
-`foreground/`) still trains but warns, and DALI is much slower on large images
-with it. Rerun `mist_preprocess` to fix it.
+generic loader can center patches on foreground without scanning labels
+(`foreground/` is new in 2.5.0). Since 2.4.1, labels are saved in C order; data
+from 2.4.0 or earlier has Fortran-order labels, which make DALI much slower on
+large images. It still trains, with a warning. Rerun `mist_preprocess` to fix
+it.
 
 ### `mist_train`
 
@@ -973,7 +974,7 @@ decides which model is saved to `models/fold_{fold}.pt`:
 
 - **`0.0` (default):** the held-out fold is the validation set, used only to
   track the loss. The saved model is from the final epoch, so the fold never
-  chooses its own model. Scores may come out slightly lower than in 2.4.0, which
+  chooses its own model. Scores may come out slightly lower than in 2.4.x, which
   saved the lowest-loss model; that is the bias being removed.
 - **Above `0.0`:** that share of each fold's training cases is the validation
   set, and the held-out fold stays an independent test set. The saved model has
@@ -1062,7 +1063,7 @@ mist_finalize --results /shared/results
 
 ## Changes in 2.5.0 (unreleased)
 
-Say so if a user is on a released version, since 2.4.0 behaves differently.
+Say so if a user is on a released version, since 2.4.x behaves differently.
 
 - **New defaults:** `nnunet-plain` is the default network, `training.compile` is
   on for new configs, and `training.amp` is `"auto"`. `nnunet-res` is a clearer
@@ -1091,13 +1092,33 @@ Say so if a user is on a released version, since 2.4.0 behaves differently.
 - **New options and warnings:** `training.validate_every` and
   `--validate-every`, plus warnings for config mistakes and for fewer than 5
   validation cases.
-- **Fixed:** multi-GPU runs now apply MIST's GPU math settings (cuDNN benchmark
-  mode, fast matmul, and TF32 convolutions) in every process, so multi-GPU speed
-  and first-step memory may change. `resenc` no longer crashes on the second
-  multi-GPU step with "Expected to have finished reduction in the prior
-  iteration". The transfer summary no longer double-counts shared parameters,
-  which made nnFoundationCNN report about 180.6M loaded parameters instead of
-  about 90.3M.
+- **Fixed:** everything fixed in 2.4.1.
+
+## Changes in 2.4.1
+
+Bug fixes only, for problems in 2.4.0. If a 2.4.0 user hits one of these, tell
+them to upgrade (`pip install -U mist-medical`).
+
+- `resenc` no longer crashes multi-GPU training on the second step with
+  "Expected to have finished reduction in the prior iteration". Unused
+  segmentation layers are frozen and stay in the state dict, so checkpoints
+  still load.
+- Multi-GPU runs apply MIST's GPU math settings (cuDNN benchmark mode, fast
+  matmul, and TF32 convolutions) in every process, not just the parent, so
+  multi-GPU speed and first-step memory may change.
+- `mist_preprocess` saves labels in C order. Fortran-order labels from 2.4.0
+  made DALI wait about 1.9 s per step on LiTS-sized CT on an A100; `mist_train`
+  warns about them, and rerunning `mist_preprocess` fixes it.
+- `mist_analyze` computes `median_resampled_image_size` in RAI axis order, so
+  images stored with permuted axes get the right size estimate, memory warning,
+  and patch size.
+- The generic loader's validation and test loaders no longer fill `/dev/shm`:
+  they start their workers at the first batch, stop them after each pass, and
+  use at most 2 workers, each reading one volume ahead. In 2.4.0 they held about
+  10 GiB per GPU on LiTS, enough for bus errors in a container with a 10 GiB
+  `/dev/shm`.
+- The transfer summary no longer double-counts shared parameters, which made
+  nnFoundationCNN report about 180.6M loaded parameters instead of about 90.3M.
 
 ## Changes in 2.4.0
 
