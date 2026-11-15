@@ -89,8 +89,8 @@ Runs analyze → preprocess → train in sequence.
 
 ```
 --data          Path to dataset JSON (required)
---numpy         Path for NumPy output (default: ./numpy)
---results       Path for pipeline output (default: ./results)
+--numpy         Path for NumPy output (required)
+--results       Path for pipeline output (required)
 ```
 
 Passes on to the three stages: `--nfolds`, `--num-workers-analyze`, `--verify`,
@@ -110,7 +110,7 @@ stops on an existing `config.json`. Use `mist_train --resume`.
 
 ```
 --data                    Path to dataset JSON (required)
---results                 Output directory (default: ./results)
+--results                 Output directory (required)
 --nfolds                  Number of CV folds (default: 5)
 --num-workers-analyze     Parallel workers (default: 1)
 --verify                  Validate dataset integrity before analysis
@@ -121,7 +121,7 @@ stops on an existing `config.json`. Use `mist_train --resume`.
 
 ```
 --results                 Results dir from analyze (required)
---numpy                   Output dir for NumPy arrays (default: ./numpy)
+--numpy                   Output dir for NumPy arrays (required)
 --num-workers-preprocess  Parallel workers (default: 1)
 --no-preprocess           Skip reorientation/cropping/resampling/normalization; convert NIfTI → NumPy only
 --compute-dtms            Compute signed distance transform maps (required for bl, hdos, gsl losses)
@@ -138,9 +138,9 @@ problem; strongly recommend rerunning `mist_preprocess`.
 ### `mist_train`
 
 ```
---results                 Results dir from analyze (default: ./results; must hold
+--results                 Results dir from analyze (required; must hold
                           config.json, train_paths.csv, fg_bboxes.csv)
---numpy                   NumPy dir from preprocess (default: ./numpy; must hold
+--numpy                   NumPy dir from preprocess (required; must hold
                           images/ and labels/)
 --model                   Architecture key (default: nnunet-plain, from config.json).
                           Plans again if this changes the network.
@@ -186,7 +186,7 @@ configured -- the same steps `mist_train` runs automatically when a single
 invocation trains every fold.
 
 ```
---results               Path to output of the MIST pipeline (default: ./results)
+--results               Path to output of the MIST pipeline (required)
 --num-workers-evaluate  Parallel workers for evaluation (default: 1)
 --device                cpu, cuda, or GPU index like 0, for test-set inference (default: cuda)
 ```
