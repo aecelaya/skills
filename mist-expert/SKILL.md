@@ -93,7 +93,18 @@ Runs analyze → preprocess → train in sequence.
 --results       Path for pipeline output (default: ./results)
 ```
 
-Accepts all flags from `mist_analyze`, `mist_preprocess`, and `mist_train`.
+Passes on to the three stages: `--nfolds`, `--num-workers-analyze`, `--verify`,
+`--num-workers-preprocess`, `--no-preprocess`, `--compute-dtms`, `--model`,
+`--patch-size`, `--loss`, `--composite-loss-weighting`, `--epochs`,
+`--warmup-epochs`, `--batch-size-per-gpu`, `--learning-rate`, `--lr-scheduler`,
+`--optimizer`, `--l2-penalty`, `--folds`, `--num-workers-evaluate`,
+`--overwrite` (to all three stages).
+
+**Accepted but silently ignored** (not in `run_all_entrypoint.train_keys`):
+`--val-percent`, `--validate-every`, `--resume`, `--pretrained-weights`,
+`--pretrained-config`, `--input-channel-strategy`. Tell users to run `mist_train`
+for these, or set `training.val_percent` / `training.validate_every` in
+`config.json`.
 
 ### `mist_analyze`
 
@@ -103,7 +114,7 @@ Accepts all flags from `mist_analyze`, `mist_preprocess`, and `mist_train`.
 --nfolds                  Number of CV folds (default: 5)
 --num-workers-analyze     Parallel workers (default: 1)
 --verify                  Validate dataset integrity before analysis
---overwrite               Overwrite existing config
+--overwrite               Replace an existing config.json (without it: FileExistsError)
 ```
 
 ### `mist_preprocess`
@@ -114,7 +125,7 @@ Accepts all flags from `mist_analyze`, `mist_preprocess`, and `mist_train`.
 --num-workers-preprocess  Parallel workers (default: 1)
 --no-preprocess           Skip reorientation/cropping/resampling/normalization; convert NIfTI → NumPy only
 --compute-dtms            Compute signed distance transform maps (required for bl, hdos, gsl losses)
---overwrite               Overwrite existing preprocessed data
+--overwrite               Write into a non-empty --numpy dir (without it: FileExistsError)
 ```
 
 Output: `images/`, `labels/`, optional `dtms/`, and (since 3.0) `foreground/`,
@@ -127,8 +138,10 @@ problem; strongly recommend rerunning `mist_preprocess`.
 ### `mist_train`
 
 ```
---results                 Results dir from analyze (required)
---numpy                   NumPy dir from preprocess (required)
+--results                 Results dir from analyze (default: ./results; must hold
+                          config.json, train_paths.csv, fg_bboxes.csv)
+--numpy                   NumPy dir from preprocess (default: ./numpy; must hold
+                          images/ and labels/)
 --model                   Architecture key (default: nnunet-plain, from config.json).
                           Plans again if this changes the network.
 --patch-size              Override patch size: X Y Z
@@ -157,8 +170,12 @@ problem; strongly recommend rerunning `mist_preprocess`.
                           encoder-compatibility validation for MIST and MISFIT checkpoints)
 --input-channel-strategy  Handle in_channels mismatch: average, first, skip (default: average)
 --num-workers-evaluate    Parallel workers for post-fold evaluation (default: 1)
---overwrite               Overwrite existing results
+--overwrite               Train even if results.csv exists (without it:
+                          FileExistsError). Mutually exclusive with --resume.
 ```
+
+Training flags override `config.json` and are saved back to it. Defaults listed
+are those of a new config.
 
 ### `mist_finalize`
 
@@ -185,7 +202,8 @@ fail) if any configured fold is still missing a saved model.
 --config             Path to results/config.json (required)
 --paths-csv          CSV with 'id' column + one column per image key (required)
 --output             Output directory for predictions (required)
---device             cpu, cuda, or GPU index like 0 (default: cuda)
+--device             cpu, cuda, or GPU index like 0 (default: cuda; "cuda" also
+                     means ROCm; falls back to CPU with a warning if no GPU)
 --postprocess-strategy  Path to postprocessing strategy JSON
 --output-probs       Also write each patient's final (post fold/TTA-ensemble,
                      pre-argmax) softmax probability volume. Splits output
@@ -427,8 +445,16 @@ Key rules:
 - `training.hardware.num_cpu_workers` is the data loader's `DataLoader` worker
   count per GPU; default: 4 since 3.0 (8 in older configs). Not the same as
   `--num-workers-*` flags.
-- `training.foreground_prob` (2.x name: `dali_foreground_prob`, still read) is
-  the chance a training patch is centered on foreground.
+- `training.foreground_prob` (default 0.6; 2.x name: `dali_foreground_prob`,
+  still read) is the chance a training patch is centered on foreground: a class
+  is picked with equal weight among those present in the case, then a voxel of
+  it (from `foreground/<id>.npz`, up to 10,000 saved locations per class, or a
+  label scan if the folder is missing). Otherwise the patch is placed uniformly.
+- `inference`: `inferer.name` is `sliding_window`; `inferer.params`:
+  `patch_overlap` (0.5, must be in `[0, 1)`), `patch_blend_mode` (`gaussian` or
+  `constant`), optional `sw_batch_size`. `ensemble.strategy`: `mean` (averages
+  fold softmax outputs). `tta.strategy`: `all_flips` (identity + 7 flips, 8
+  forward passes per patch) or `none`; `tta.enabled` true by default.
 - `training.hardware.data_loader` is `"generic"`, the only loader since 3.0;
   `"auto"` and 2.x's `"dali"` resolve to it (`"dali"` with a warning).
   `training.hardware.communication_backend` defaults to `"auto"` and is resolved
@@ -530,8 +556,11 @@ Composite losses blend a region term and a boundary/topology term:
 | `linear`   | Gradually increase boundary term weight over training.                                                 |
 | `cosine`   | Same as linear but smoother. Recommended for `cldice` — skeleton term is unreliable early in training. |
 
-`linear` and `cosine` support `init_pause` (default: 5 epochs), `start_val`, and
-`end_val`. Fine-tune these in `config.json` under
+`linear` and `cosine` take `init_pause` (default 5), `start_val` (1.0), and
+`end_val` (0.0). α equals `start_val` for 0-based epochs `0..init_pause`
+inclusive, so the default holds 6 epochs; decay starts at epoch `init_pause + 1`.
+`constant` takes `value` (0.5). Without a schedule (`null`), α is 0.5. The CLI
+flag writes the schedule's default params to `config.json`; fine-tune them under
 `training.loss.composite_loss_weighting`:
 
 ```json
@@ -614,12 +643,16 @@ gradients than small ones, which can destabilize AMP training.
 | `surf_dice`             | Surface Dice at configurable tolerance (`tolerance`, default 1.0 mm) |
 | `lesion_wise_dice`      | BraTS-style lesion-wise Dice                                         |
 | `lesion_wise_haus95`    | BraTS-style lesion-wise HD95                                         |
-| `lesion_wise_surf_dice` | BraTS-style lesion-wise surface Dice                                 |
+| `lesion_wise_surf_dice` | BraTS-style lesion-wise surface Dice (`tolerance`, default 1.0 mm)   |
+| `lesion_wise_f1`        | Lesion detection F1: `2·TP / (2·TP + FP + FN)`                       |
 
-Lesion-wise metrics score: `sum(scores) / (num_gt_above_thresh + num_fp)`. Key
-parameters: `min_lesion_volume` (mm³, default 10.0), `dilation_iters` (default
-3), `gt_consolidation_iters` (default 0; set equal to `dilation_iters` for
-BraTS-style GT consolidation).
+Lesion-wise Dice, HD95, and surface Dice score:
+`sum(scores) / (num_gt_above_thresh + num_fp)`. All four lesion-wise metrics
+take `min_lesion_volume` (mm³, default 10.0), `dilation_iters` (default 3), and
+`gt_consolidation_iters` (default 0; set equal to `dilation_iters` for
+BraTS-style GT consolidation). Metric params go in each class's `metrics` dict,
+e.g. `"surf_dice": {"tolerance": 2.0}`. `mist_analyze` writes `dice` and
+`haus95` for each class.
 
 ---
 
@@ -1185,13 +1218,13 @@ mist/
     cli/                # All entrypoints and args.py
     conversion_tools/   # mist_convert_msd and mist_convert_csv logic
     data_loading/       # Generic data loader, GPU augmentation, data loader registry
-    evaluation/         # Metrics, evaluator, ranking
+    evaluation/         # Evaluator, ranking
     inference/          # Sliding window, TTA, softmax ensemblers, label ensemblers, inference runners
     loss_functions/     # Loss registry, base class, all loss implementations
-    metrics/            # Metric implementations
+    metrics/            # Metric implementations and metric registry
     models/             # Model registry and all architecture implementations
     postprocessing/     # Transform registry, postprocessor
-    preprocessing/      # Resampling, normalization, DTM computation
+    preprocessing/      # Resampling, normalization, DTMs, foreground locations
     training/           # Trainers, optimizers, LR schedulers, patch planning, precision
                         # test, config warnings
     utils/              # I/O, console output, misc; hardware.py has accelerator
@@ -1357,19 +1390,21 @@ class MyCompositeLoss(SegmentationLoss):
 from mist.loss_functions.losses.my_loss import MyLoss
 ```
 
-**Step 3 (optional) — Opt into trainer features** in
+**Step 3 (optional) — Opt into trainer features** by adding the name to the
+frozensets on the `TrainerConstants` dataclass in
 `mist/training/trainers/trainer_constants.py`:
 
 ```python
-DTM_AWARE_LOSSES: FrozenSet[str] = frozenset({"bl", "hdos", "gsl", "my_loss"})
-COMPOSITE_LOSSES: FrozenSet[str] = frozenset({..., "my_loss"})
-SPACING_AWARE_LOSSES: FrozenSet[str] = frozenset({..., "my_loss"})
+# inside class TrainerConstants
+DTM_AWARE_LOSSES: frozenset[str] = frozenset({"bl", "hdos", "gsl", "my_loss"})
+COMPOSITE_LOSSES: frozenset[str] = frozenset({..., "my_loss"})
+SPACING_AWARE_LOSSES: frozenset[str] = frozenset({..., "my_loss"})
 ```
 
 | Frozenset              | What it enables                                                                                                                                                      |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `DTM_AWARE_LOSSES`     | Precomputed DTMs loaded and passed as `dtm=` kwarg in `forward`. Requires `--compute-dtms` at preprocessing time.                                                    |
-| `COMPOSITE_LOSSES`     | `composite_loss_weighting` scheduling becomes available via `--composite-loss-weighting` or `config.json`. The scheduled `alpha` is passed as `alpha=` in `forward`. |
+| `COMPOSITE_LOSSES`     | `composite_loss_weighting` schedules `alpha`. The trainer always passes `alpha=` to `forward`; it's 0.5 unless the loss is in this set and a schedule is configured. |
 | `SPACING_AWARE_LOSSES` | Voxel spacing read from `spatial_config.target_spacing` and passed as `sddl_spacing_xyz=` at construction time.                                                      |
 
 After these steps, `--loss my_loss` works with `mist_train` and `mist_run_all`.
@@ -1378,35 +1413,40 @@ After these steps, `--loss my_loss` works with `mist_train` and `mist_run_all`.
 
 ## Adding a Custom Postprocessing Transform
 
+Transforms live in `mist/postprocessing/transform_registry.py`
+(`mist/postprocessing/__init__.py` is empty; the registry module registers on
+import). Add a function there, following the built-in ones:
+
 ```python
-# mist/postprocessing/transforms/my_transform.py
-from mist.postprocessing.transform_registry import register_transform
-import numpy as np
-
-
 @register_transform(
     "my_transform",
     metadata={
         "description": "What this transform does.",
+        "per_label": "both",  # or a fixed requirement, as for replace_small_objects_with_label
         "kwargs": {
             "my_param": {
                 "type": "int",
-                "default": 10,
                 "description": "Controls X.",
-                "bounds": [1, None],
-            }
+                "default": 10,
+                "min": 1,
+            },
         },
     },
 )
-def my_transform(mask: np.ndarray, my_param: int = 10) -> np.ndarray:
-    """Apply custom transform to a binary mask."""
+def my_transform(
+    mask: npt.NDArray[Any], labels_list: list[int], per_label: bool = False, **kwargs
+) -> npt.NDArray[Any]:
+    """Apply the transform to the given labels of a multi-label mask."""
+    my_param = kwargs.get("my_param", 10)
     ...
-    return transformed_mask
+    return new_mask
 ```
 
-Add an import to `mist/postprocessing/__init__.py` to trigger registration. The
-transform then becomes available by name in strategy JSON files and is returned
-by `describe_transforms()`.
+The function receives the whole multi-label mask, the strategy step's
+`apply_to_labels` as `labels_list`, its `per_label` flag, and its `kwargs`. Once
+registered, the name works in strategy JSON files and appears in
+`describe_transforms()`. Copy the exact metadata keys from an existing transform
+in that file.
 
 ---
 
