@@ -98,13 +98,13 @@ Passes on to the three stages: `--nfolds`, `--num-workers-analyze`, `--verify`,
 `--patch-size`, `--loss`, `--composite-loss-weighting`, `--epochs`,
 `--warmup-epochs`, `--batch-size-per-gpu`, `--learning-rate`, `--lr-scheduler`,
 `--optimizer`, `--l2-penalty`, `--folds`, `--num-workers-evaluate`,
-`--overwrite` (to all three stages).
+`--val-percent`, `--validate-every`, `--pretrained-weights`,
+`--pretrained-config`, `--input-channel-strategy`, `--overwrite` (to all three
+stages). Every `mist_train` flag except `--resume` is passed on (a test in
+`tests/cli/test_run_all_entrypoint.py` enforces this).
 
-**Accepted but silently ignored** (not in `run_all_entrypoint.train_keys`):
-`--val-percent`, `--validate-every`, `--resume`, `--pretrained-weights`,
-`--pretrained-config`, `--input-channel-strategy`. Tell users to run `mist_train`
-for these, or set `training.val_percent` / `training.validate_every` in
-`config.json`.
+**`--resume` is rejected** with an error: `mist_run_all` reruns analyze, which
+stops on an existing `config.json`. Use `mist_train --resume`.
 
 ### `mist_analyze`
 
