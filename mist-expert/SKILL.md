@@ -475,6 +475,7 @@ Key rules:
 | `nnunet`                           | Same network as `nnunet-res`; name kept for compatibility  |
 | `nnunet-pocket`                    | nnU-Net with constant 32 filters (~700K params)            |
 | `resenc`                           | Residual Encoder UNet (nnU-Net ResEnc M/L/XL network)      |
+| `resenc-pocket`                    | ResEnc with constant 32 filters (~1.8M params at 6 stages) |
 | `mednext-small/base/medium/large`  | MedNeXt variants                                           |
 | `fmgnet`                           | FMG-Net (multigrid, pocket paradigm)                       |
 | `wnet`                             | W-Net (multigrid, pocket paradigm)                         |
@@ -514,8 +515,8 @@ Notes on the newer architectures:
 
 The planner picks valid sizes on its own, so these matter for hand-set patches.
 
-- `nnunet-plain`, `nnunet-res`, `nnunet`, `nnunet-pocket`, `resenc`, `fmgnet`,
-  `wnet`: each axis is a multiple of that axis's total stride, which depends on
+- `nnunet-plain`, `nnunet-res`, `nnunet`, `nnunet-pocket`, `resenc`,
+  `resenc-pocket`, `fmgnet`, `wnet`: each axis is a multiple of that axis's total stride, which depends on
   the patch and spacing (usually 32 on fully downsampled axes; an axis that
   isn't downsampled can be any size)
 - `mednext-*`: all dims divisible by 16 (fixed 4-stage encoder)
@@ -919,7 +920,8 @@ mist_train --results /path/to/results --numpy /path/to/numpy \
 **`--pretrained-config`** is optional. For MIST or MISFIT checkpoints, pass the
 source `config.json`: MIST checks that the architecture matches and, for
 adaptive architectures, that `patch_size` and `target_spacing` match. For
-`resenc` a patch size or spacing mismatch is only a **warning**, because each
+`resenc`, `resenc-pocket`, and `nnunet-plain` a patch size or spacing mismatch
+is only a **warning**, because each
 stage's parameter shapes don't depend on the patch size, so every shared stage
 still transfers exactly. A MISFIT config with a null `target_spacing`
 (pretrained without resampling) or no `spatial_config` warns that spacing can't
