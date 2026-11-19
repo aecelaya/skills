@@ -17,24 +17,26 @@ exact command they ran before diagnosing.
 
 MIST automates the full segmentation pipeline:
 
-1. **Analyze** (`mist_analyze`) — reads dataset JSON, computes target spacing,
-   patch size (GPU-memory-aware), normalization strategy, and writes
-   `config.json`.
+1. **Analyze** (`mist_analyze`) — reads dataset JSON, computes target spacing
+   and normalization strategy, and writes `config.json`. It leaves the patch and
+   batch size as `"auto"`.
 2. **Preprocess** (`mist_preprocess`) — reorients, crops, resamples, and
    normalizes NIfTI images into NumPy arrays.
-3. **Train** (`mist_train`) — five-fold cross-validation using PyTorch DDP. Once
-   every configured fold has finished training, aggregates out-of-fold
-   predictions into `results.csv` and runs held-out test-set inference if
-   configured. When folds are trained across separate per-node jobs instead
-   (`--folds` requests a subset), this finalization step is skipped and deferred
-   to `mist_finalize`.
+3. **Train** (`mist_train`) — the first run plans the patch and batch size for
+   its GPU, network, and precision, and saves them to `config.json`. It then
+   runs five-fold cross-validation using PyTorch DDP. Once every configured fold
+   has finished training, aggregates out-of-fold predictions into `results.csv`
+   and runs held-out test-set inference if configured. When folds are trained
+   across separate per-node jobs instead (`--folds` requests a subset), this
+   finalization step is skipped and deferred to `mist_finalize`.
 4. **Finalize** (`mist_finalize`) — only needed for distributed,
    one-fold-per-node training (see
    [Multi-GPU and HPC Setup](#multi-gpu-and-hpc-setup)). Run once, after every
    per-fold `mist_train` job sharing a `--results` directory has finished, to
    produce the final `results.csv` and test-set predictions.
 5. **Predict** (`mist_predict`) — sliding-window inference with optional TTA and
-   postprocessing.
+   postprocessing. Class probabilities are resampled to the original image space
+   before the argmax.
 6. **Ensemble** (`mist_ensemble`) — combines discrete NIfTI predictions from
    multiple models via STAPLE or majority vote, or averages pre-argmax
    probability volumes from `mist_predict --output-probs`.
@@ -87,50 +89,66 @@ Runs analyze → preprocess → train in sequence.
 
 ```
 --data          Path to dataset JSON (required)
---numpy         Path for NumPy output (default: ./numpy)
---results       Path for pipeline output (default: ./results)
+--numpy         Path for NumPy output (required)
+--results       Path for pipeline output (required)
 ```
 
-Accepts all flags from `mist_analyze`, `mist_preprocess`, and `mist_train`.
+Passes on to the three stages: `--nfolds`, `--num-workers-analyze`, `--verify`,
+`--num-workers-preprocess`, `--no-preprocess`, `--compute-dtms`, `--model`,
+`--patch-size`, `--loss`, `--composite-loss-weighting`, `--epochs`,
+`--warmup-epochs`, `--batch-size-per-gpu`, `--learning-rate`, `--lr-scheduler`,
+`--optimizer`, `--l2-penalty`, `--folds`, `--num-workers-evaluate`,
+`--val-percent`, `--validate-every`, `--pretrained-weights`,
+`--pretrained-config`, `--input-channel-strategy`, `--overwrite` (to all three
+stages). Every `mist_train` flag except `--resume` is passed on (a test in
+`tests/cli/test_run_all_entrypoint.py` enforces this).
+
+**`--resume` is rejected** with an error: `mist_run_all` reruns analyze, which
+stops on an existing `config.json`. Use `mist_train --resume`.
 
 ### `mist_analyze`
 
 ```
 --data                    Path to dataset JSON (required)
---results                 Output directory (default: ./results)
+--results                 Output directory (required)
 --nfolds                  Number of CV folds (default: 5)
 --num-workers-analyze     Parallel workers (default: 1)
 --verify                  Validate dataset integrity before analysis
---overwrite               Overwrite existing config
+--overwrite               Replace an existing config.json (without it: FileExistsError)
 ```
 
 ### `mist_preprocess`
 
 ```
 --results                 Results dir from analyze (required)
---numpy                   Output dir for NumPy arrays (default: ./numpy)
+--numpy                   Output dir for NumPy arrays (required)
 --num-workers-preprocess  Parallel workers (default: 1)
 --no-preprocess           Skip reorientation/cropping/resampling/normalization; convert NIfTI → NumPy only
 --compute-dtms            Compute signed distance transform maps (required for bl, hdos, gsl losses)
---overwrite               Overwrite existing preprocessed data
+--overwrite               Write into a non-empty --numpy dir (without it: FileExistsError)
 ```
 
-Output: `images/`, `labels/`, and optional `dtms/`. Since 2.4.1, labels are saved
-in C order; data from 2.4.0 or earlier has Fortran-order labels, which make DALI
-much slower on large images. It still trains, with a warning. Rerun
-`mist_preprocess` to fix it.
+Output: `images/`, `labels/`, optional `dtms/`, and (since 3.0) `foreground/`,
+the locations of each foreground class per case, so data loader workers don't
+scan every label. Since 2.4.1, labels are saved in C order; Fortran-order labels
+from 2.4.0 or earlier can't be read with positioned reads, which is slow on NFS.
+Data from 2.x (including 2.5.0rc0) still trains, with a warning for each
+problem; strongly recommend rerunning `mist_preprocess`.
 
 ### `mist_train`
 
 ```
---results                 Results dir from analyze (required)
---numpy                   NumPy dir from preprocess (required)
---model                   Architecture key (default: nnunet)
+--results                 Results dir from analyze (required; must hold
+                          config.json, train_paths.csv, fg_bboxes.csv)
+--numpy                   NumPy dir from preprocess (required; must hold
+                          images/ and labels/)
+--model                   Architecture key (default: nnunet-plain, from config.json).
+                          Plans again if this changes the network.
 --patch-size              Override patch size: X Y Z
 --loss                    Loss function key (default: dice_ce)
 --composite-loss-weighting  Schedule for composite losses: constant, linear, cosine
 --epochs                  Epochs per fold (default: 1000)
---batch-size-per-gpu      Batch size per GPU (default: 2)
+--batch-size-per-gpu      Batch size per GPU (default: planned at the first mist_train)
 --learning-rate           Learning rate (overrides config.json; default comes from config)
 --lr-scheduler            LR scheduler: cosine, polynomial, constant (default: cosine)
 --warmup-epochs           Linear warmup epochs (overrides config.json; default comes from config)
@@ -140,15 +158,24 @@ much slower on large images. It still trains, with a warning. Rerun
                           subset of the configured folds, the post-training
                           finalization step (results.csv, test-set inference)
                           is skipped -- see `mist_finalize` below.
---resume                  Resume from last checkpoint
+--val-percent             Share of each fold's training cases to hold out for
+                          validation (default: 0.0). Also decides which model is
+                          saved; see Custom Cross-Validation.
+--validate-every          Validate every N epochs, always on the last (default: 25)
+--resume                  Resume from last checkpoint. Warns if --val-percent or
+                          --validate-every differ from the saved run.
 --pretrained-weights      Path to pretrained checkpoint for encoder init (MIST, MISFIT,
                           nnU-Net/nnssl, or PyTorch Lightning; see Transfer Learning)
 --pretrained-config       Path to the source config.json (optional; enables
                           encoder-compatibility validation for MIST and MISFIT checkpoints)
 --input-channel-strategy  Handle in_channels mismatch: average, first, skip (default: average)
 --num-workers-evaluate    Parallel workers for post-fold evaluation (default: 1)
---overwrite               Overwrite existing results
+--overwrite               Train even if results.csv exists (without it:
+                          FileExistsError). Mutually exclusive with --resume.
 ```
+
+Training flags override `config.json` and are saved back to it. Defaults listed
+are those of a new config.
 
 ### `mist_finalize`
 
@@ -159,7 +186,7 @@ configured -- the same steps `mist_train` runs automatically when a single
 invocation trains every fold.
 
 ```
---results               Path to output of the MIST pipeline (default: ./results)
+--results               Path to output of the MIST pipeline (required)
 --num-workers-evaluate  Parallel workers for evaluation (default: 1)
 --device                cpu, cuda, or GPU index like 0, for test-set inference (default: cuda)
 ```
@@ -175,7 +202,8 @@ fail) if any configured fold is still missing a saved model.
 --config             Path to results/config.json (required)
 --paths-csv          CSV with 'id' column + one column per image key (required)
 --output             Output directory for predictions (required)
---device             cpu, cuda, or GPU index like 0 (default: cuda)
+--device             cpu, cuda, or GPU index like 0 (default: cuda; "cuda" also
+                     means ROCm; falls back to CPU with a warning if no GPU)
 --postprocess-strategy  Path to postprocessing strategy JSON
 --output-probs       Also write each patient's final (post fold/TTA-ensemble,
                      pre-argmax) softmax probability volume. Splits output
@@ -286,26 +314,34 @@ generated by `mist_analyze` and required by all downstream commands.
 
 ```json
 {
-  "mist_version": "2.4.1",
+  "mist_version": "3.0.0",
   "dataset_info": { "task": "...", "modality": "mr", "images": [...], "labels": [...] },
   "spatial_config": {
-    "patch_size": [128, 128, 128],
+    "patch_size": "auto",
     "target_spacing": [1.0, 1.0, 1.0]
   },
   "preprocessing": {
     "skip": false,
     "crop_to_foreground": true,
+    "median_resampled_image_size": [240, 240, 155],
     "normalize_with_nonzero_mask": true,
     "compute_dtms": false,
     "normalize_dtms": true
   },
   "model": {
-    "architecture": "nnunet",
+    "architecture": "nnunet-plain",
     "params": { "in_channels": 4, "out_channels": 4 }
   },
   "training": {
+    "seed": 42,
+    "nfolds": 5,
+    "folds": null,
+    "val_percent": 0.0,
+    "validate_every": 25,
     "epochs": 1000,
-    "batch_size_per_gpu": 2,
+    "min_steps_per_epoch": 250,
+    "batch_size_per_gpu": "auto",
+    "gpu_memory_budget_gb": 8,
     "optimizer": "adamw",
     "learning_rate": 0.001,
     "lr_scheduler": "cosine",
@@ -313,23 +349,27 @@ generated by `mist_analyze` and required by all downstream commands.
     "l2_penalty": 0.0001,
     "grad_clip_norm": 1.0,
     "loss": { "name": "dice_ce", "composite_loss_weighting": null },
-    "amp": true,
-    "dali_foreground_prob": 0.6,
+    "amp": "auto",
+    "compile": true,
+    "foreground_prob": 0.6,
     "augmentation": {
       "enabled": true,
-      "transforms": { "flips": true, "zoom": true, "noise": true, "blur": true, "brightness": true, "contrast": true }
+      "transforms": {
+        "flips": true, "rotation": true, "scaling": true, "noise": true, "blur": true,
+        "brightness": true, "contrast": true, "low_resolution": true, "gamma": true
+      }
     },
     "hardware": {
-      "num_gpus": 1,
-      "num_cpu_workers": 8,
+      "num_gpus": null,
+      "num_cpu_workers": 4,
       "master_addr": "localhost",
       "master_port": 12345,
-      "communication_backend": "nccl",
-      "data_loader": "dali"
+      "communication_backend": "auto",
+      "data_loader": "generic"
     }
   },
   "inference": {
-    "inferer": { "name": "sliding_window", "params": { "patch_blend_mode": "gaussian", "patch_overlap": 0.5, "sw_batch_size": 4 } },
+    "inferer": { "name": "sliding_window", "params": { "patch_blend_mode": "gaussian", "patch_overlap": 0.5 } },
     "ensemble": { "strategy": "mean" },
     "tta": { "enabled": true, "strategy": "all_flips" }
   },
@@ -342,34 +382,82 @@ generated by `mist_analyze` and required by all downstream commands.
 Key rules:
 
 - `spatial_config.patch_size` and `target_spacing` are the single source of
-  truth — edit here to override analysis.
+  truth — edit here to override analysis. A freshly analyzed config has `"auto"`
+  for `patch_size` and `batch_size_per_gpu`; the first `mist_train` replaces
+  them and records what it planned for under `planning`.
 - `patch_overlap` must be in `[0, 1)` — `1.0` is invalid.
-- `training.amp` enables BF16 automatic mixed precision (default: `true`). BF16
-  is hardware-accelerated on NVIDIA Ampere or newer GPUs (A100, RTX 30xx, H100)
-  and on AMD GPUs with matrix hardware — CDNA (MI100/200/300) and RDNA3+ (RX
-  7000 series and newer). MIST resolves this against the detected hardware at
-  train time (`hardware.resolve_amp()`) and downgrades to FP32 automatically
-  with a warning when BF16 isn't supported — pre-Ampere NVIDIA cards (V100, T4,
-  RTX 20xx), pre-RDNA3 AMD cards (RX 5000/6000 series), and CPU-only hardware
-  all hit this path. `bf16_supported()` checks ROCm's `gcnArchName` against a
-  known-good allow-list rather than trusting `torch.cuda.is_bf16_supported()`,
-  which reports True on RDNA1/2 too (via slow ALU emulation, not matrix hardware
-  — confirmed to regress speed on a real RX 6800-class card). It never errors;
-  set `"amp": false` explicitly only to silence the warning. AMP is propagated
-  to validation, fold testing, and `mist_predict` inference automatically.
-- `inference.inferer.params.sw_batch_size` controls how many sliding-window
-  patches are processed per forward pass (default: `2 × batch_size_per_gpu`).
-  Increase for higher GPU utilisation on high-VRAM cards; decrease if patch
-  batches cause OOM during inference.
+- `training.amp` is `"auto"` by default. On a GPU, the first `mist_train` times
+  real training steps on random data (`precision_test.choose_precision`),
+  compiling the model if training will, and saves `true`, `false`, or `"fp16"`.
+  Tiers: with hardware BF16, BF16 vs FP32, then FP16 only if BF16 isn't at least
+  1.10× faster than FP32 (some old A100s run BF16 slowly); without it, FP32 vs
+  FP16. The default (BF16, else FP32) is kept unless another precision keeps the
+  same patch, fits in memory, and is at least `PRECISION_MIN_SPEEDUP` (1.10×)
+  faster in samples per second; it's also kept if its own timing fails. No GPU:
+  FP32, no test. BF16 is hardware-accelerated on NVIDIA Ampere or newer GPUs
+  (A100, RTX 30xx, H100) and on AMD GPUs with matrix hardware — CDNA
+  (MI100/200/300) and RDNA3+ (RX 7000 series and newer). An explicit `true` is
+  resolved against the detected hardware at train time
+  (`hardware.resolve_amp()`) and downgrades to FP32 with a warning when BF16
+  isn't supported — pre-Ampere NVIDIA cards (V100, T4, RTX 20xx), pre-RDNA3 AMD
+  cards (RX 5000/6000 series), and CPU-only hardware all hit this path.
+  `bf16_supported()` checks ROCm's `gcnArchName` against a known-good allow-list
+  rather than trusting `torch.cuda.is_bf16_supported()`, which reports True on
+  RDNA1/2 too (via slow ALU emulation, not matrix hardware — confirmed to
+  regress speed on a real RX 6800-class card). AMP is propagated to validation,
+  fold testing, and `mist_predict` inference automatically.
+- `training.amp: "fp16"` (2.5.0, set by hand or chosen by `"auto"`) trains in
+  FP16 on any GPU, for pre-Ampere cards with FP16 tensor cores (V100, T4, Quadro
+  RTX 6000); Pascal consumer cards run FP16 slowly. It uses
+  `torch.amp.GradScaler` (unscale before clipping; scale saved in checkpoints as
+  `grad_scaler_state_dict`), computes the loss in FP32 from `.float()` outputs
+  outside autocast, and keeps `OPTIMIZER_EPS` at 1e-8 (AdamW state is FP32).
+  `_leave_fp16_if_failing` switches the rest of a fold to BF16 or FP32 after 20
+  consecutive NaN/inf losses or a gradient scale below 1; other folds start in
+  FP16 again. The planner estimates FP16 activations at `FP16_ACTIVATION_FACTOR`
+  (0.80 of FP32, or the network's BF16 factor if higher; measured 0.62–0.64 on a
+  T4, 0.80 on an A100) vs BF16's 0.55, via `patch_planning.activation_factor`.
+  On a T4, FP16 trained `nnunet-plain` 3.5–4× faster than FP32. The A100's
+  higher FP16 memory comes from `cudnn.benchmark` picking algorithms with large
+  workspaces (with it off, FP16 and BF16 peak alike at the same speed).
+- `training.compile` compiles the model with `torch.compile` during training.
+  New configs set it to `true`; configs from before this setting don't have the
+  key and train without it. It has no CLI flag: to change it, edit
+  `config.json`. It stays off on CPUs and Windows without a warning, and the
+  training summary table shows whether it's on. Checkpoints keep the same weight
+  names, and inference doesn't compile. Expect extra time at the start of each
+  fold, about 1 to 7 minutes on an A100, then faster steps: a median of 1.6
+  times in BF16 and 1.25 times in FP32 on an A100 without data loading, and
+  about 7% per epoch in real FP32 training on two RTX 6000s. If a user hits a
+  compiler error, suggest `"compile": false`.
+- `mist_train` warns about mistakes in `config.json`: unused keys, with the
+  likely spelling, and values of the wrong type or range. These are only
+  warnings, so a misspelled setting still trains, without the setting taking
+  effect. Missing keys aren't reported.
+- `inference.inferer.params.sw_batch_size` isn't in a new config. Without it,
+  validation and inference predict up to 4 patches at once, or fewer if the
+  network wouldn't fit, worked out on the GPU in use. Setting it overrides that.
+  It doesn't change predictions. If inference runs out of GPU memory, MIST
+  halves the batch, then stitches on the CPU at a batch of 1.
 - `grad_clip_norm` is not exposed as a CLI flag; edit `config.json` directly.
 - `training.hardware.master_port` defaults to `12345`; change it when running
   multiple concurrent MIST jobs on the same machine to avoid port conflicts.
-- `training.hardware.num_cpu_workers` controls the active data loader's internal
-  CPU thread/worker count (DALI threads, or the generic loader's `DataLoader`
-  workers — whichever is active, see below); default: 8. Not the same as
+- `training.hardware.num_cpu_workers` is the data loader's `DataLoader` worker
+  count per GPU; default: 4 since 3.0 (8 in older configs). Not the same as
   `--num-workers-*` flags.
-- `training.hardware.data_loader` and `training.hardware.communication_backend`
-  both default to `"auto"` in a freshly analyzed `config.json` and are resolved
+- `training.foreground_prob` (default 0.6; 2.x name: `dali_foreground_prob`,
+  still read) is the chance a training patch is centered on foreground: a class
+  is picked with equal weight among those present in the case, then a voxel of
+  it (from `foreground/<id>.npz`, up to 10,000 saved locations per class, or a
+  label scan if the folder is missing). Otherwise the patch is placed uniformly.
+- `inference`: `inferer.name` is `sliding_window`; `inferer.params`:
+  `patch_overlap` (0.5, must be in `[0, 1)`), `patch_blend_mode` (`gaussian` or
+  `constant`), optional `sw_batch_size`. `ensemble.strategy`: `mean` (averages
+  fold softmax outputs). `tta.strategy`: `all_flips` (identity + 7 flips, 8
+  forward passes per patch) or `none`; `tta.enabled` true by default.
+- `training.hardware.data_loader` is `"generic"`, the only loader since 3.0;
+  `"auto"` and 2.x's `"dali"` resolve to it (`"dali"` with a warning).
+  `training.hardware.communication_backend` defaults to `"auto"` and is resolved
   once, at train time, against the detected accelerator (CUDA, AMD ROCm, or CPU)
   — see
   [Accelerator Detection and Data Loaders](#accelerator-detection-and-data-loaders)
@@ -382,9 +470,12 @@ Key rules:
 
 | Key                                | Architecture                                               |
 | ---------------------------------- | ---------------------------------------------------------- |
-| `nnunet`                           | nnU-Net (default)                                          |
+| `nnunet-plain`                     | Plain convolutional U-Net (default)                        |
+| `nnunet-res`                       | Residual nnU-Net                                           |
+| `nnunet`                           | Same network as `nnunet-res`; name kept for compatibility  |
 | `nnunet-pocket`                    | nnU-Net with constant 32 filters (~700K params)            |
 | `resenc`                           | Residual Encoder UNet (nnU-Net ResEnc M/L/XL network)      |
+| `resenc-pocket`                    | ResEnc with constant 32 filters (~1.8M params at 6 stages) |
 | `mednext-small/base/medium/large`  | MedNeXt variants                                           |
 | `fmgnet`                           | FMG-Net (multigrid, pocket paradigm)                       |
 | `wnet`                             | W-Net (multigrid, pocket paradigm)                         |
@@ -392,14 +483,18 @@ Key rules:
 | `primus-medium/large/x`            | Primus (V1) transformer; `primus-x` = nnFoundationViT size |
 | `primusv2-small/base/medium/large` | PrimusV2 (deeper residual tokenizer)                       |
 
-Notes on the newer architectures (added in 2.4.0):
+Notes on the newer architectures:
 
+- **`nnunet-plain`** (added in 2.5.0): two plain convolutions per stage, no
+  depth limit, and an axis is downsampled only when its spacing is under twice
+  the finest spacing among axes that can still be downsampled. Its parameter
+  names match nnU-Net's `PlainConvUNet`, so those checkpoints load directly.
 - **`resenc`** is the Residual Encoder UNet from _nnU-Net Revisited_ (Isensee et
   al., 2024): ResNet-D blocks `(1, 3, 4, 6, 6, 6)` per stage, filters 32 → 320,
   plain UNet decoder, deep supervision. It uses the same adaptive topology as
-  `nnunet` (stages, kernels, and strides from `patch_size` and
+  `nnunet-res` (stages, kernels, and strides from `patch_size` and
   `target_spacing`). nnU-Net's ResEnc M/L/XL presets are the same network and
-  differ only in planned patch and batch size, which MIST's analysis sets.
+  differ only in planned patch and batch size, which MIST plans for the GPU.
   Isotropically, a 96³ patch gives 5 stages (~63M params) and ≥128³ gives 6
   (~102M). Parameter names match nnU-Net's `ResidualEncoderUNet`.
 - **Primus / PrimusV2** (Wald et al., 2025) are transformer-centric: 8×8×8
@@ -418,16 +513,17 @@ Notes on the newer architectures (added in 2.4.0):
 
 **Patch size constraints:**
 
-- `nnunet`, `nnunet-pocket`, `resenc`, `fmgnet`, `wnet`: multiples of 32 on
-  downsampled axes (adaptive — low-res axis uses stride-1, so any value is valid
-  there)
+The planner picks valid sizes on its own, so these matter for hand-set patches.
+
+- `nnunet-plain`, `nnunet-res`, `nnunet`, `nnunet-pocket`, `resenc`,
+  `resenc-pocket`, `fmgnet`, `wnet`: each axis is a multiple of that axis's total stride, which depends on
+  the patch and spacing (usually 32 on fully downsampled axes; an axis that
+  isn't downsampled can be any size)
 - `mednext-*`: all dims divisible by 16 (fixed 4-stage encoder)
 - `swinunetr-*`: all dims divisible by 32 (validated at model construction;
   raises `ValueError` immediately if violated)
 - `primus-*`, `primusv2-*`: all dims divisible by 8 (one token per 8³ patch;
-  raises `ValueError` at model construction if violated). Watch for this with
-  anisotropic data: quasi-2D mode can pick a low-res axis size (e.g. 5 or 12)
-  that isn't a multiple of 8, so set `--patch-size` explicitly.
+  raises `ValueError` at model construction if violated).
 
 **MedNeXt kernel size:** set via `model.params.kernel_size` in `config.json`
 (values: 3, 5, 7; default: 3). Not a CLI flag.
@@ -461,8 +557,11 @@ Composite losses blend a region term and a boundary/topology term:
 | `linear`   | Gradually increase boundary term weight over training.                                                 |
 | `cosine`   | Same as linear but smoother. Recommended for `cldice` — skeleton term is unreliable early in training. |
 
-`linear` and `cosine` support `init_pause` (default: 5 epochs), `start_val`, and
-`end_val`. Fine-tune these in `config.json` under
+`linear` and `cosine` take `init_pause` (default 5), `start_val` (1.0), and
+`end_val` (0.0). α equals `start_val` for 0-based epochs `0..init_pause`
+inclusive, so the default holds 6 epochs; decay starts at epoch `init_pause + 1`.
+`constant` takes `value` (0.5). Without a schedule (`null`), α is 0.5. The CLI
+flag writes the schedule's default params to `config.json`; fine-tune them under
 `training.loss.composite_loss_weighting`:
 
 ```json
@@ -545,12 +644,16 @@ gradients than small ones, which can destabilize AMP training.
 | `surf_dice`             | Surface Dice at configurable tolerance (`tolerance`, default 1.0 mm) |
 | `lesion_wise_dice`      | BraTS-style lesion-wise Dice                                         |
 | `lesion_wise_haus95`    | BraTS-style lesion-wise HD95                                         |
-| `lesion_wise_surf_dice` | BraTS-style lesion-wise surface Dice                                 |
+| `lesion_wise_surf_dice` | BraTS-style lesion-wise surface Dice (`tolerance`, default 1.0 mm)   |
+| `lesion_wise_f1`        | Lesion detection F1: `2·TP / (2·TP + FP + FN)`                       |
 
-Lesion-wise metrics score: `sum(scores) / (num_gt_above_thresh + num_fp)`. Key
-parameters: `min_lesion_volume` (mm³, default 10.0), `dilation_iters` (default
-3), `gt_consolidation_iters` (default 0; set equal to `dilation_iters` for
-BraTS-style GT consolidation).
+Lesion-wise Dice, HD95, and surface Dice score:
+`sum(scores) / (num_gt_above_thresh + num_fp)`. All four lesion-wise metrics
+take `min_lesion_volume` (mm³, default 10.0), `dilation_iters` (default 3), and
+`gt_consolidation_iters` (default 0; set equal to `dilation_iters` for
+BraTS-style GT consolidation). Metric params go in each class's `metrics` dict,
+e.g. `"surf_dice": {"tolerance": 2.0}`. `mist_analyze` writes `dice` and
+`haus95` for each class.
 
 ---
 
@@ -714,30 +817,63 @@ results/
 
 ---
 
-## Patch Size Selection
+## Patch and Batch Size Planning
 
-The analysis step selects patch size automatically based on available GPU
-memory:
+The first `mist_train` plans whatever is still `"auto"`, for a memory budget,
+network, and precision (`mist/training/patch_planning.py`).
+`training.gpu_memory_budget_gb` defaults to 8: one sample may have at most 560M
+activations (as `estimate_network` counts them) per 8 GiB at batch 2, whatever
+the precision (`activation_limit`). Networks with more bytes per activation than
+the default (Swin) get a proportionally lower limit. The plan must also fit 90%
+of the GPU by MIST's byte estimate. `null` plans for 90% of the GPU instead;
+configs without the key get 8. LiTS and BraTS-sized data get 128³ in BF16 or
+FP32 (FP32 about 11 GiB vs 6.5). Unbudgeted, LiTS on a 40 GB A100 got 256 × 224
+× 224 and ran out of memory in the first step (one convolution asked for 41
+GiB); a budget of 40 gives the same patch. The budget is saved as
+`planning.memory_budget_gb`, and the "a larger patch may fit" warning only
+applies to unbudgeted plans. Later runs, `--resume`, and inference reuse the
+saved values, so analysis and preprocessing can run on a different machine from
+training. MIST assumes all GPUs on a machine are the same.
+
+1. **Start large:** a patch shaped by the target spacing, clipped to
+   `median_resampled_image_size`, and reduced to the nearest size the network
+   can use.
+2. **Shrink until it fits:** while batch size 2 exceeds the budget, shrink the
+   axis taking up the largest share of the image.
+3. **Spend what's left on the batch:** the batch stays at 2 if the patch had to
+   shrink. If the patch reached the image size with memory to spare, the batch
+   grows, but one global batch sees at most 5% of the dataset's voxels.
+
+The estimate counts the actual network's activations without using a GPU:
 
 ```
-budget = (min_gpu_memory / 16 GB) × 128³ × (2 / batch_size_per_gpu)
+memory = 0.5 GiB + 16 B × parameters + bytes per activation × activations × batch
 ```
 
-On CPU-only hardware (no CUDA/ROCm device visible), there's no GPU memory to
-size against, so this falls back to a fixed default budget of 128³ voxels
-instead — a deliberate simplification, not a bug; a CPU-RAM-aware budget was
-considered and rejected as unnecessary complexity for now (see
-`cpu_rocm_support_plan.md`'s Stage 1 notes in the MIST repo history).
+| Network                       | Bytes per activation (FP32) | BF16 factor |
+| ----------------------------- | --------------------------- | ----------- |
+| Default                       | 12                          | 0.55        |
+| `swinunetr-*`                 | 17                          | 0.9         |
+| `primus-*` (not `primusv2-*`) | 12                          | 0.7         |
 
-- **Isotropic mode** (used when `max_spacing / min_spacing ≤ 3`): computes a
-  physically isotropic patch extent from the budget, clamps axes to median image
-  size, then snaps each dim down to the nearest multiple of 32.
-- **Quasi-2D mode** (used when `max_spacing / min_spacing > 3`): maximizes
-  in-plane resolution by keeping the low-resolution axis thin (minimum size: 5
-  voxels). In-plane axes are snapped to multiples of 32.
+These were fitted to steady training memory on a Tesla T4, L4, A100, and RTX PRO
+6000, with 5 classes. Swin and Primus values come from `swinunetr-small` and
+`primus-medium` only. **Known gaps:** many-class datasets may be underestimated,
+and `primusv2-*` with `amp` off grows faster than the estimate on the A100, L4,
+and RTX PRO 6000 (not on the T4) and can run out of memory. BF16 isn't affected.
 
-To override: edit `spatial_config.patch_size` in `config.json` or pass
-`--patch-size X Y Z` to `mist_train`.
+**Later runs:** a later `mist_train` warns, without changing anything, if the
+network may not fit, or if the GPU has at least 1.5 times the memory it was
+planned for. To plan again, set both values back to `"auto"`. Changing the
+network with `--model` plans again automatically, keeping values set by hand.
+
+**To override:** edit `spatial_config.patch_size` or `batch_size_per_gpu` in
+`config.json`, or pass `--patch-size X Y Z` or `--batch-size-per-gpu` to
+`mist_train`. A value set by hand is kept and the other is chosen around it;
+with a hand-set patch, the batch is 2 unless set too. If training runs out of
+memory, use a smaller `--patch-size`.
+
+On CPU-only hardware, planning assumes 16 GiB of memory.
 
 ---
 
@@ -784,7 +920,8 @@ mist_train --results /path/to/results --numpy /path/to/numpy \
 **`--pretrained-config`** is optional. For MIST or MISFIT checkpoints, pass the
 source `config.json`: MIST checks that the architecture matches and, for
 adaptive architectures, that `patch_size` and `target_spacing` match. For
-`resenc` a patch size or spacing mismatch is only a **warning**, because each
+`resenc`, `resenc-pocket`, and `nnunet-plain` a patch size or spacing mismatch
+is only a **warning**, because each
 stage's parameter shapes don't depend on the patch size, so every shared stage
 still transfers exactly. A MISFIT config with a null `target_spacing`
 (pretrained without resampling) or no `spatial_config` warns that spacing can't
@@ -834,11 +971,6 @@ than six stages (the deepest pretrained stage is unused; MIST warns). MIST's CT
 normalization clips to a window before z-scoring, unlike nnFoundation's
 pretraining; its effect on fine-tuning hasn't been measured.
 
-The transfer summary's "scalar parameters" figure double-counts in MIST 2.4.0:
-ResEnc registers each convolution under two names that share one tensor (`conv`
-and `all_modules.0`), so nnFoundationCNN reports ~180.6M instead of the real
-~90.3M. Only the printout is wrong; the weights load correctly. Fixed in 2.4.1.
-
 ### Fine-tuning settings
 
 Neither nnssl nor MIST publishes tuned fine-tuning hyperparameters for these
@@ -875,8 +1007,17 @@ By default MIST uses a random 5-fold split. To customize:
 4. Run `mist_train` as normal.
 
 To hold out a validation subset within each fold, set `training.val_percent` in
-`config.json` (range `0.0–1.0`) or pass `--val-percent` to `mist_train`. Default
-is `0.0` (the full held-out fold is used for validation).
+`config.json` (range `0.0–1.0`) or pass `--val-percent` to `mist_train`. It also
+decides which model is saved to `models/fold_{fold}.pt`:
+
+- **`0.0` (default):** the held-out fold is the validation set, used only to
+  track the loss. The saved model is from the final epoch, so the fold never
+  chooses its own model. Scores may come out slightly lower than in 2.4.x, which
+  saved the lowest-loss model; that is the bias being removed.
+- **Above `0.0`:** that share of each fold's training cases is the validation
+  set, and the held-out fold stays an independent test set. The saved model has
+  the lowest validation loss after exponential smoothing (decay 0.9). MIST warns
+  if this leaves fewer than 5 validation cases.
 
 ---
 
@@ -888,28 +1029,23 @@ MIST auto-detects its accelerator (NVIDIA CUDA, AMD ROCm, or CPU-only) via
 `torch.version.hip` (a version string on ROCm, `None` otherwise) is what tells
 them apart. Nothing needs to be set for this — it's automatic.
 
-Two `config.json` fields get resolved against the detected accelerator, once,
-the first time `mist_train` runs, and the resolved value is persisted back to
-`config.json` (same pattern as `training.amp`'s resolve-and-persist):
+`config.json` fields are resolved the first time `mist_train` runs, and the
+resolved value is persisted back to `config.json` (same pattern as
+`training.amp`'s resolve-and-persist):
 
-- **`training.hardware.data_loader`**: `"dali"` (NVIDIA's GPU-accelerated
-  pipeline) on CUDA hardware where it's installed; MIST's own generic,
-  pure-PyTorch data loader everywhere else — AMD ROCm, CPU-only, or a CUDA
-  machine that skipped installing DALI (`pip install "mist-medical[dali]"`,
-  recommended on NVIDIA GPUs; `pip install "mist-medical[train]"` is kept as an
-  identical alias for users on pre-CPU/ROCm-support MIST releases). The generic
-  loader (`mist/data_loading/generic_loader.py`) implements the same
-  augmentations (flips, zoom, noise, blur, brightness, contrast) on CPU instead
-  of in a GPU pipeline — slower per batch, no NVIDIA-specific dependency. If
-  CUDA hardware is detected but DALI isn't registered (not installed), MIST
-  warns and falls back to the generic loader rather than raising.
+- **`training.hardware.data_loader`**: always MIST's generic loader
+  (`mist/data_loading/generic_loader.py`) since 3.0, which removed NVIDIA DALI.
+  `"auto"` and `"dali"` (from 2.x configs) resolve to `"generic"`; `"dali"` warns.
+  It reads each patch with positioned reads from C-order `.npy` files, in
+  `DataLoader` workers that last the whole fold, and pads on the GPU. It only
+  extracts patches: augmentation runs in PyTorch on each batch on the training
+  device (`mist/data_loading/augmentation.py`). The `[dali]` and `[train]`
+  extras still install but are empty (removed in 4.0). Users who need DALI can
+  pin `mist-medical[dali]==2.4.1`, the last DALI release.
 - **`training.hardware.communication_backend`**: `"nccl"` on both CUDA and ROCm
   (ROCm routes `"nccl"` to RCCL transparently — no code change needed), `"gloo"`
-  on CPU-only hardware.
-
-Both default to `"auto"` in a freshly analyzed `config.json`; an explicit
-non-`"auto"` value already in `config.json` is always respected, never silently
-overridden. CPU-only training is single-process only — no multi-CPU-process
+  on CPU-only hardware. Defaults to `"auto"`; an explicit value is never
+  overridden. CPU-only training is single-process only — no multi-CPU-process
 distributed training (multi-GPU DDP, on either CUDA or ROCm, works as described
 below).
 
@@ -930,9 +1066,22 @@ uses all GPUs visible to the process.
   extra flags needed.
 - **Port conflicts** (multiple concurrent jobs on same machine): change
   `training.hardware.master_port` in `config.json` to a unique value per job.
-- **Data loader thread/worker count**: tune `training.hardware.num_cpu_workers`
-  in `config.json` (default: 8) if your machine has significantly more or fewer
-  CPU cores. Applies to whichever loader is active (DALI or generic).
+- **Data loader worker count**: tune `training.hardware.num_cpu_workers` in
+  `config.json` (default: 4 per GPU since 3.0). On 2× A100 with LiTS, 4 workers
+  matched all cores and sped up the first epoch and validation. Training batches
+  use roughly `num_cpu_workers` × 4 batches of `/dev/shm` per GPU; in containers
+  give `--shm-size` enough room.
+
+**What extra GPUs change:** more GPUs let MIST train on more data in the same or
+a similar amount of time; they don't shorten the run by default.
+`batch_size_per_gpu` applies to each GPU, so the global batch grows with the
+number of GPUs, while steps per epoch usually stay at `min_steps_per_epoch`. Two
+GPUs with a batch size of 2 use a global batch of 4 and train on twice as many
+patches per epoch. The extra data isn't guaranteed to improve accuracy. To
+finish sooner instead, lower `training.min_steps_per_epoch` in proportion, such
+as from `250` to `125` on two GPUs. The step count won't go below the number of
+training cases divided by the global batch. Validation splits its cases across
+GPUs, so it gets faster either way.
 
 **Distributed training across nodes (one fold per node):** point every node at
 the same shared `--results` directory and restrict each one to its own fold(s)
@@ -951,6 +1100,61 @@ mist_finalize --results /shared/results
 ```
 
 ---
+
+## Changes in 3.0.0 (unreleased; 3.0.0rc0 is the release candidate)
+
+Say so if a user is on a released version, since 2.4.x behaves differently.
+2.5.0 was never released as final; 2.5.0rc0 (tag `v2.5.0-rc`) became 3.0, so
+everything below the DALI items was already in 2.5.0rc0.
+
+- **DALI removed.** The generic loader is the only data loader. Benchmarks with
+  BF16: H100 full LiTS 13 s/epoch vs 67 s for DALI; 2× A100 24 vs 88 s (1.92×
+  scaling from 1 to 2 GPUs); BraTS a tie (20 vs 21–22 s). Shims: `"dali"` in
+  configs → generic with a warning; empty `[dali]`/`[train]` extras;
+  `dali_foreground_prob` read as `foreground_prob`.
+- **Inference guarantee:** `mist_predict`, `test_on_fold`, and `mist_evaluate`
+  work on results folders from 2.x and 2.5.0rc0 (checked by `tests/compat`).
+  Labels can shift slightly at boundaries for pre-2.5 models because of
+  probability resampling. The `nnunet` architecture name still maps to
+  `nnunet-res`.
+- **Re-preprocessing** is strongly recommended for 2.x data, to get the
+  `foreground/` folder (and C-order labels for data from 2.4.0 or earlier).
+- **`num_cpu_workers`** defaults to 4 in new configs.
+- **cuDNN:** PyTorch 2.9's CUDA wheels ship cuDNN 9.10, which makes 3D BF16/FP16
+  convolutions ~3× slower than FP32; `pip install -U "nvidia-cudnn-cu12>=9.15"`
+  fixes it (pip warns about torch's pin; it works). `mist_train` warns, and the
+  Docker image includes it. A config whose precision test ran under cuDNN 9.10
+  may have `amp: false`; set `"auto"` to re-test.
+- **Training results differ from 2.x** (sampling, augmentation, planning, saved
+  model, precision); users should finish 2.x runs with 2.x.
+- Upgrade guide: `docs/upgrading.md`.
+
+- **New defaults:** `nnunet-plain` is the default network, `training.compile` is
+  on for new configs, and `training.amp` is `"auto"`. `nnunet-res` is a clearer
+  name for `nnunet`.
+- **Planning at training:** the patch and batch size are planned at the first
+  `mist_train` instead of at analysis. New runs may get different sizes; configs
+  with values keep them.
+- **Target spacing** uses a new anisotropy rule: the coarsest axis moves from
+  its median to its 10th percentile only if its spacing is over 3 times the next
+  coarsest axis and its median voxel count is under a third of the smallest
+  other axis, and it never goes finer than the next coarsest axis. Existing
+  configs keep their values.
+- **Saved model:** the final epoch by default instead of the lowest held-out
+  loss; see [Custom Cross-Validation](#custom-cross-validation).
+- **Inference:** probabilities are resampled to the original image space before
+  the argmax, including for models trained with earlier versions. Validation and
+  inference use up to 4 patches at once and recover from running out of GPU
+  memory.
+- **Augmentation:** rotation, scaling from 0.7 to 1.4 (replacing zoom), low
+  resolution, and gamma are new, and noise, blur, brightness, contrast, and
+  flips have new probabilities and ranges. Missing transform keys mean enabled,
+  so older configs get the new transforms; their `zoom` key is read as
+  `scaling`.
+- **New options and warnings:** `training.validate_every` and
+  `--validate-every`, plus warnings for config mistakes and for fewer than 5
+  validation cases.
+- **Fixed:** everything fixed in 2.4.1.
 
 ## Changes in 2.4.1
 
@@ -974,9 +1178,9 @@ them to upgrade (`pip install -U mist-medical`).
   they start their workers at the first batch, stop them after each pass, and
   use at most 2 workers, each reading one volume ahead. In 2.4.0 they held about
   10 GiB per GPU on LiTS, enough for bus errors in a container with a 10 GiB
-  `/dev/shm`. This affects ROCm, CPU, and NVIDIA runs with
-  `"data_loader": "generic"`.
-- The transfer summary no longer double-counts shared parameters.
+  `/dev/shm`.
+- The transfer summary no longer double-counts shared parameters, which made
+  nnFoundationCNN report about 180.6M loaded parameters instead of about 90.3M.
 
 ## Changes in 2.4.0
 
@@ -1012,18 +1216,19 @@ them to upgrade (`pip install -U mist-medical`).
 
 ```
 mist/
-    analyze_data/       # Analyzer, patch size selection, dataset statistics
+    analyze_data/       # Analyzer, target spacing, dataset statistics
     cli/                # All entrypoints and args.py
     conversion_tools/   # mist_convert_msd and mist_convert_csv logic
-    data_loading/       # DALI pipeline + generic (CPU/ROCm) loader, data loader registry
-    evaluation/         # Metrics, evaluator, ranking
+    data_loading/       # Generic data loader, GPU augmentation, data loader registry
+    evaluation/         # Evaluator, ranking
     inference/          # Sliding window, TTA, softmax ensemblers, label ensemblers, inference runners
     loss_functions/     # Loss registry, base class, all loss implementations
+    metrics/            # Metric implementations and metric registry
     models/             # Model registry and all architecture implementations
     postprocessing/     # Transform registry, postprocessor
-    preprocessing/      # Resampling, normalization, DTM computation
-    runtime/            # Shared constants
-    training/           # Trainers, optimizers, LR schedulers
+    preprocessing/      # Resampling, normalization, DTMs, foreground locations
+    training/           # Trainers, optimizers, LR schedulers, patch planning, precision
+                        # test, config warnings
     utils/              # I/O, console output, misc; hardware.py has accelerator
                         # detection + amp/data-loader/communication-backend resolution
 ```
@@ -1187,19 +1392,21 @@ class MyCompositeLoss(SegmentationLoss):
 from mist.loss_functions.losses.my_loss import MyLoss
 ```
 
-**Step 3 (optional) — Opt into trainer features** in
+**Step 3 (optional) — Opt into trainer features** by adding the name to the
+frozensets on the `TrainerConstants` dataclass in
 `mist/training/trainers/trainer_constants.py`:
 
 ```python
-DTM_AWARE_LOSSES: FrozenSet[str] = frozenset({"bl", "hdos", "gsl", "my_loss"})
-COMPOSITE_LOSSES: FrozenSet[str] = frozenset({..., "my_loss"})
-SPACING_AWARE_LOSSES: FrozenSet[str] = frozenset({..., "my_loss"})
+# inside class TrainerConstants
+DTM_AWARE_LOSSES: frozenset[str] = frozenset({"bl", "hdos", "gsl", "my_loss"})
+COMPOSITE_LOSSES: frozenset[str] = frozenset({..., "my_loss"})
+SPACING_AWARE_LOSSES: frozenset[str] = frozenset({..., "my_loss"})
 ```
 
 | Frozenset              | What it enables                                                                                                                                                      |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `DTM_AWARE_LOSSES`     | Precomputed DTMs loaded and passed as `dtm=` kwarg in `forward`. Requires `--compute-dtms` at preprocessing time.                                                    |
-| `COMPOSITE_LOSSES`     | `composite_loss_weighting` scheduling becomes available via `--composite-loss-weighting` or `config.json`. The scheduled `alpha` is passed as `alpha=` in `forward`. |
+| `COMPOSITE_LOSSES`     | `composite_loss_weighting` schedules `alpha`. The trainer always passes `alpha=` to `forward`; it's 0.5 unless the loss is in this set and a schedule is configured. |
 | `SPACING_AWARE_LOSSES` | Voxel spacing read from `spatial_config.target_spacing` and passed as `sddl_spacing_xyz=` at construction time.                                                      |
 
 After these steps, `--loss my_loss` works with `mist_train` and `mist_run_all`.
@@ -1208,35 +1415,40 @@ After these steps, `--loss my_loss` works with `mist_train` and `mist_run_all`.
 
 ## Adding a Custom Postprocessing Transform
 
+Transforms live in `mist/postprocessing/transform_registry.py`
+(`mist/postprocessing/__init__.py` is empty; the registry module registers on
+import). Add a function there, following the built-in ones:
+
 ```python
-# mist/postprocessing/transforms/my_transform.py
-from mist.postprocessing.transform_registry import register_transform
-import numpy as np
-
-
 @register_transform(
     "my_transform",
     metadata={
         "description": "What this transform does.",
+        "per_label": "both",  # or a fixed requirement, as for replace_small_objects_with_label
         "kwargs": {
             "my_param": {
                 "type": "int",
-                "default": 10,
                 "description": "Controls X.",
-                "bounds": [1, None],
-            }
+                "default": 10,
+                "min": 1,
+            },
         },
     },
 )
-def my_transform(mask: np.ndarray, my_param: int = 10) -> np.ndarray:
-    """Apply custom transform to a binary mask."""
+def my_transform(
+    mask: npt.NDArray[Any], labels_list: list[int], per_label: bool = False, **kwargs
+) -> npt.NDArray[Any]:
+    """Apply the transform to the given labels of a multi-label mask."""
+    my_param = kwargs.get("my_param", 10)
     ...
-    return transformed_mask
+    return new_mask
 ```
 
-Add an import to `mist/postprocessing/__init__.py` to trigger registration. The
-transform then becomes available by name in strategy JSON files and is returned
-by `describe_transforms()`.
+The function receives the whole multi-label mask, the strategy step's
+`apply_to_labels` as `labels_list`, its `per_label` flag, and its `kwargs`. Once
+registered, the name works in strategy JSON files and appears in
+`describe_transforms()`. Copy the exact metadata keys from an existing transform
+in that file.
 
 ---
 

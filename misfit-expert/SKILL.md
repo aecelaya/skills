@@ -180,7 +180,7 @@ misfit_train --index   /data/index.parquet \
 
 | Flag                              | Default                 | Description                                                              |
 | --------------------------------- | ----------------------- | ------------------------------------------------------------------------ |
-| `--model NAME`                    | `swinunetr-base`        | `swinunetr-small` / `-base` / `-large`, or `resenc`                      |
+| `--model NAME`                    | `swinunetr-base`        | `swinunetr-small` / `-base` / `-large`, `resenc`, or `resenc-pocket`     |
 | `--patch-size X Y Z`              | `96 96 96`              | Crop size in voxels (at `--target-spacing` if set); divisible by 32      |
 | `--target-spacing X Y Z`          | off (native)            | Resample every volume to this spacing; saved to `spatial_config`         |
 | `--init-weights PT`               | —                       | Start from a full MAE checkpoint (MISFIT or nnssl, e.g. nnFoundationCNN) |
@@ -396,6 +396,7 @@ every crop (`model.encoder(x)[-1]`). Shapes:
   96³).
 - `resenc`: `C = 320`; a ≥128³ patch has 6 stages, so `D' = patch / 32` (4 at
   128³, 6 at 192³); 96³ has 5 stages, so `D' = 96 / 16 = 6`.
+- `resenc-pocket`: `C = 32`, same `D'` as `resenc`.
 
 Every downstream command (encode, embed, evaluate, inspect) applies the run's
 normalization policy and target spacing from `--config`, and accepts a MISFIT
@@ -519,6 +520,16 @@ run's `--target-spacing` if set, otherwise an isotropic 1 mm planning spacing
 recommended so the encoder has all six stages (nnssl's default MAE trainer uses
 160³; nnFoundationCNN used 192³).
 
+`--model resenc-pocket` is the same class with `use_pocket_model=True`: same
+stages and blocks, 32 filters in every stage (MIST's `resenc-pocket`; ~1.8M
+params, ~1.4M encoder at ≥128³). It needs MIST ≥ 3.0.0rc0, where `ResEncUNet`
+gained `use_pocket_model`; MISFIT still requires only MIST 2.4, so `ResEncMAE`
+checks the argument exists and raises `ImportError` naming the upgrade if not.
+Saved `model.architecture` is `resenc-pocket`, and MIST treats it as a different
+architecture from `resenc`: fine-tune with `--model resenc-pocket`.
+nnFoundationCNN and other nnssl ResEnc weights don't fit the pocket widths;
+`load_model_weights` rejects them with a pocket-specific message.
+
 ### Model variants
 
 | Variant | `--model`         | Size              | Encoder params | Full MAE params |
@@ -527,6 +538,7 @@ recommended so the encoder has all six stages (nnssl's default MAE trainer uses
 | Base    | `swinunetr-base`  | feature_size 48   | ~18.6M         | ~27.1M          |
 | Large   | `swinunetr-large` | feature_size 96   | ~73.9M         | ~107.7M         |
 | ResEnc  | `resenc`          | 6 stages at ≥128³ | ~90M           | ~102M           |
+| Pocket  | `resenc-pocket`   | 6 stages at ≥128³ | ~1.4M          | ~1.8M           |
 
 "Encoder params" is what transfers to MIST (`encoder_weights.pt`); "Full MAE
 params" adds the decoder and mask token used only during pretraining.
@@ -778,6 +790,7 @@ MISFIT encoders transfer directly to MIST (`mist-medical>=2.4.0`) for supervised
 | ---------------- | ------------------ | ---------------------------------------------------- |
 | `swinunetr-*`    | same `swinunetr-*` | `encoder.<name>` → `model.swinViT.<name>` (remapped) |
 | `resenc`         | `resenc`           | `encoder.<name>` unchanged                           |
+| `resenc-pocket`  | `resenc-pocket`    | `encoder.<name>` unchanged (MIST ≥ 3.0)              |
 
 ```console
 mist_train \
