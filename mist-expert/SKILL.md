@@ -473,7 +473,9 @@ Key rules:
 | `nnunet-plain`                     | Plain convolutional U-Net (default)                        |
 | `nnunet-res`                       | Residual nnU-Net                                           |
 | `nnunet`                           | Same network as `nnunet-res`; name kept for compatibility  |
-| `nnunet-pocket`                    | nnU-Net with constant 32 filters (~700K params)            |
+| `nnunet-plain-pocket`              | `nnunet-plain` with 32 filters per stage (~0.76M at 128³)  |
+| `nnunet-res-pocket`                | `nnunet-res` with 32 filters per stage (~0.77M at 128³)    |
+| `nnunet-pocket`                    | Same network as `nnunet-res-pocket`; name kept             |
 | `resenc`                           | Residual Encoder UNet (nnU-Net ResEnc M/L/XL network)      |
 | `resenc-pocket`                    | ResEnc with constant 32 filters (~1.8M params at 6 stages) |
 | `mednext-small/base/medium/large`  | MedNeXt variants                                           |
@@ -489,6 +491,14 @@ Notes on the newer architectures:
   depth limit, and an axis is downsampled only when its spacing is under twice
   the finest spacing among axes that can still be downsampled. Its parameter
   names match nnU-Net's `PlainConvUNet`, so those checkpoints load directly.
+- **Pocket nnU-Nets** (unreleased, after 3.0.0rc0): `nnunet-plain-pocket` is
+  `nnunet-plain` at a constant 32 filters, so it differs from the default only
+  in width (the clean width comparison). `nnunet-res-pocket` is the residual
+  pocket network that `nnunet-pocket` always built; `nnunet-pocket` is now an
+  alias for it, like `nnunet` for `nnunet-res`, so old configs and checkpoints
+  are unchanged. Note that `nnunet-pocket` is residual: comparing it with
+  `nnunet-plain` changes both width and block type. In 3.0.0rc0 only
+  `nnunet-pocket` exists.
 - **`resenc`** is the Residual Encoder UNet from _nnU-Net Revisited_ (Isensee et
   al., 2024): ResNet-D blocks `(1, 3, 4, 6, 6, 6)` per stage, filters 32 → 320,
   plain UNet decoder, deep supervision. It uses the same adaptive topology as
@@ -515,8 +525,9 @@ Notes on the newer architectures:
 
 The planner picks valid sizes on its own, so these matter for hand-set patches.
 
-- `nnunet-plain`, `nnunet-res`, `nnunet`, `nnunet-pocket`, `resenc`,
-  `resenc-pocket`, `fmgnet`, `wnet`: each axis is a multiple of that axis's total stride, which depends on
+- `nnunet-plain`, `nnunet-plain-pocket`, `nnunet-res`, `nnunet`,
+  `nnunet-res-pocket`, `nnunet-pocket`, `resenc`, `resenc-pocket`, `fmgnet`,
+  `wnet`: each axis is a multiple of that axis's total stride, which depends on
   the patch and spacing (usually 32 on fully downsampled axes; an axis that
   isn't downsampled can be any size)
 - `mednext-*`: all dims divisible by 16 (fixed 4-stage encoder)
@@ -920,7 +931,7 @@ mist_train --results /path/to/results --numpy /path/to/numpy \
 **`--pretrained-config`** is optional. For MIST or MISFIT checkpoints, pass the
 source `config.json`: MIST checks that the architecture matches and, for
 adaptive architectures, that `patch_size` and `target_spacing` match. For
-`resenc`, `resenc-pocket`, and `nnunet-plain` a patch size or spacing mismatch
+`resenc`, `resenc-pocket`, `nnunet-plain`, and `nnunet-plain-pocket` a patch size or spacing mismatch
 is only a **warning**, because each
 stage's parameter shapes don't depend on the patch size, so every shared stage
 still transfers exactly. A MISFIT config with a null `target_spacing`
